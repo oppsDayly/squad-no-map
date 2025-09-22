@@ -23,17 +23,17 @@ const char *PLUGIN_VERSION = "@CMAKE_PROJECT_VERSION@";
 
 void obs_log(int log_level, const char *format, ...)
 {
-	size_t length = 4 + strlen(PLUGIN_NAME) + strlen(format);
+    // 计算包含插件名前缀的格式模板长度："[NAME] " + 原始format
+    size_t length = 4 + strlen(PLUGIN_NAME) + strlen(format);
 
-	char *template = malloc(length + 1);
+    char *template = (char *)malloc(length + 1);
 
-	snprintf(template, length, "[%s] %s", PLUGIN_NAME, format);
+    snprintf(template, length + 1, "[%s] %s", PLUGIN_NAME, format);
 
-	va_list(args);
+    va_list args;
+    va_start(args, format);
+    blogva(log_level, template, args);
+    va_end(args);
 
-	va_start(args, format);
-	blogva(log_level, template, args);
-	va_end(args);
-
-	free(template);
+    free(template);
 }

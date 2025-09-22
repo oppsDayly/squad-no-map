@@ -27,9 +27,11 @@ extern "C" {
 #include <stdarg.h>
 #include <string.h>
 
+// 插件元信息，从CMake生成的plugin-support.c提供定义
 extern const char *PLUGIN_NAME;
 extern const char *PLUGIN_VERSION;
 
+// 统一日志封装：在OBS内部blogva基础上添加插件名前缀
 void obs_log(int log_level, const char *format, ...);
 extern void blogva(int log_level, const char *format, va_list args);
 

@@ -18,17 +18,29 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <obs-module.h>
 #include <plugin-support.h>
+#include "filters/predictive_delay_filter.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 bool obs_module_load(void)
 {
-	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
-	return true;
+    obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
+    // 注册预测延迟滤镜
+    obs_register_source(get_predictive_delay_filter_info());
+    obs_log(LOG_INFO, "registered source: predictive_delay");
+    return true;
 }
 
 void obs_module_unload(void)
 {
 	obs_log(LOG_INFO, "plugin unloaded");
 }
+
+#ifdef __cplusplus
+}
+#endif
