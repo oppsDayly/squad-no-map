@@ -135,9 +135,9 @@ struct pd_b_state {
 
     uint64_t next_index = 0;
 
-    int back_frames = 6;
+    int back_frames = 90;
 
-    int hold_frames = 6;
+    int hold_frames = 55;
 
     uint32_t occ_w = 0;
 
@@ -187,9 +187,9 @@ struct pd_b_state {
 
     int gpu_id = 0;
 
-    int gpu_mem_mb = 1024;
+    int gpu_mem_mb = 512;
 
-    int cpu_threads = 2;
+    int cpu_threads = 1;
 
     double conf_threshold = 0.7;
 
@@ -201,7 +201,7 @@ struct pd_b_state {
 
     bool use_cpu = false;
 
-    int ocr_interval_ms = 0;
+    int ocr_interval_ms = 100;
 
     uint64_t next_ocr_allowed_time_ns = 0;
 
@@ -960,7 +960,7 @@ static inline void pd_capture_and_submit(struct pd_filter_data *f, pd_b_state *s
 
     cfg.hold_frames = st->hold_frames;
 
-    cfg.cpu_threads = st->cpu_threads;
+    cfg.cpu_threads = st->use_cpu ? 1 : st->cpu_threads;
 
     worker->update_config(cfg);
 
@@ -1595,6 +1595,9 @@ static void pd_update(void *data, obs_data_t *s)
 
     st->use_cpu = obs_data_get_bool(s, S_USE_CPU);
 
+    if (st->use_cpu)
+        st->cpu_threads = 1;
+
     // full reset
 
     f->cx = f->cy = 0; f->interval_ns = 0;
@@ -1633,11 +1636,11 @@ static void pd_defaults(obs_data_t *s)
 
 {
 
-    obs_data_set_default_int(s, S_DELAY_MS, 750);
+    obs_data_set_default_int(s, S_DELAY_MS, 300);
 
-    obs_data_set_default_int(s, S_BACK_FRAMES, 6);
+    obs_data_set_default_int(s, S_BACK_FRAMES, 90);
 
-    obs_data_set_default_int(s, S_HOLD_FRAMES, 6);
+    obs_data_set_default_int(s, S_HOLD_FRAMES, 55);
 
     obs_data_set_default_bool(s, S_OCC_AUTO, true);
 
@@ -1657,15 +1660,15 @@ static void pd_defaults(obs_data_t *s)
 
     obs_data_set_default_bool(s, S_ENABLE_OCR, false);
 
-    obs_data_set_default_int(s, S_OCR_INTERVAL_MS, 0);
+    obs_data_set_default_int(s, S_OCR_INTERVAL_MS, 100);
 
     obs_data_set_default_bool(s, S_USE_CPU, false);
 
-    obs_data_set_default_int(s, S_CPU_THREADS, 2);
+    obs_data_set_default_int(s, S_CPU_THREADS, 1);
 
     obs_data_set_default_int(s, S_GPU_ID, 0);
 
-    obs_data_set_default_int(s, S_GPU_MEM, 1024);
+    obs_data_set_default_int(s, S_GPU_MEM, 512);
 
     obs_data_set_default_double(s, S_CONF_THR, 0.7);
 

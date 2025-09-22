@@ -23,13 +23,13 @@ struct OcrWorkerConfig {
   bool debug_log = false;
   bool use_cpu = false;
   int gpu_id = 0;
-  int gpu_mem_mb = 2048;
+  int gpu_mem_mb = 512;
   std::string model_dir;   // ppocr rec model dir
   std::string dict_path;   // character dict (ppocr_keys_v1.txt)
   double conf_threshold = 0.7;
-  int back_frames = 6;
-  int hold_frames = 6;
-  int cpu_threads = 2;
+  int back_frames = 90;
+  int hold_frames = 55;
+  int cpu_threads = 1;
 };
 
 namespace paddle_infer { class Predictor; }
@@ -59,7 +59,7 @@ private:
   bool running_ = false;
   bool pending_stop_ = false;
 
-  struct Job { uint64_t idx = 0; int back_frames = 6; int hold_frames = 6; int cpu_threads = 2; std::array<OcrRoiImage,3> rois; };
+  struct Job { uint64_t idx = 0; int back_frames = 90; int hold_frames = 55; int cpu_threads = 1; std::array<OcrRoiImage,3> rois; };
   std::queue<Job> q_;
   OcrWorkerConfig cfg_;
   OcrWorkerConfig active_cfg_;

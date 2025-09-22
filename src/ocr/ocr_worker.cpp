@@ -46,13 +46,22 @@ void OcrWorker::stop() {
 
 void OcrWorker::update_config(const OcrWorkerConfig &cfg) {
   std::lock_guard<std::mutex> lk(mu_);
-  if (cfg_.enable != cfg.enable || cfg_.gpu_id != cfg.gpu_id || cfg_.gpu_mem_mb != cfg.gpu_mem_mb ||
-      cfg_.model_dir != cfg.model_dir || cfg_.dict_path != cfg.dict_path ||
-      cfg_.conf_threshold != cfg.conf_threshold ||
-      cfg_.use_cpu != cfg.use_cpu || cfg_.cpu_threads != cfg.cpu_threads) {
+  OcrWorkerConfig adjusted = cfg;
+  if (adjusted.cpu_threads < 1)
+    adjusted.cpu_threads = 1;
+  if (adjusted.use_cpu)
+    adjusted.cpu_threads = 1;
+  if (adjusted.back_frames < 0)
+    adjusted.back_frames = 0;
+  if (adjusted.hold_frames < 0)
+    adjusted.hold_frames = 0;
+  if (cfg_.enable != adjusted.enable || cfg_.gpu_id != adjusted.gpu_id || cfg_.gpu_mem_mb != adjusted.gpu_mem_mb ||
+      cfg_.model_dir != adjusted.model_dir || cfg_.dict_path != adjusted.dict_path ||
+      cfg_.conf_threshold != adjusted.conf_threshold ||
+      cfg_.use_cpu != adjusted.use_cpu || cfg_.cpu_threads != adjusted.cpu_threads) {
     need_reinit_ = true;
   }
-  cfg_ = cfg;
+  cfg_ = std::move(adjusted);
 }
 
 void OcrWorker::submit(uint64_t frame_index, const std::array<OcrRoiImage,3> &rois) {
