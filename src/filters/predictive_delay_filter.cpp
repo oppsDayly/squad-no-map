@@ -48,9 +48,6 @@
 
 #define S_HOLD_FRAMES "pd_hold_frames"
 
-#define S_OCC_PATH "pd_occ_path"
-
-#define S_OCC_AUTO "pd_occ_auto_align"
 
 #define S_SHOW_ROI  "pd_show_roi"
 
@@ -64,14 +61,6 @@ static constexpr double k_roi_x_defaults[k_roi_count] = {29.6, 25.8, 64.6};
 static constexpr double k_roi_y_defaults[k_roi_count] = {2.4, 12.0, 10.8};
 static constexpr double k_roi_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
 static constexpr double k_roi_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
-
-#define S_OCC_OFFSET_X "pd_occ_offset_x"
-
-#define S_OCC_OFFSET_Y "pd_occ_offset_y"
-
-#define S_OCC_W "pd_occ_w"
-
-#define S_OCC_H "pd_occ_h"
 
 #define S_ENABLE_OCR "pd_enable_ocr"
 
@@ -1535,15 +1524,15 @@ static void pd_update(void *data, obs_data_t *s)
 
     st->hold_frames = (int)obs_data_get_int(s, S_HOLD_FRAMES);
 
-    st->occ_offset_x = (int)obs_data_get_int(s, S_OCC_OFFSET_X);
+    st->occ_offset_x = 0;
 
-    st->occ_offset_y = (int)obs_data_get_int(s, S_OCC_OFFSET_Y);
+    st->occ_offset_y = 0;
 
-    st->occ_w = (uint32_t)obs_data_get_int(s, S_OCC_W);
+    st->occ_w = 0;
 
-    st->occ_h = (uint32_t)obs_data_get_int(s, S_OCC_H);
+    st->occ_h = 0;
 
-    st->occ_auto_align = obs_data_get_bool(s, S_OCC_AUTO);
+    st->occ_auto_align = true;
 
     if (st->occ_path) { bfree(st->occ_path); st->occ_path = nullptr; }
 
@@ -1642,16 +1631,6 @@ static void pd_defaults(obs_data_t *s)
 
     obs_data_set_default_int(s, S_HOLD_FRAMES, 55);
 
-    obs_data_set_default_bool(s, S_OCC_AUTO, true);
-
-    obs_data_set_default_int(s, S_OCC_OFFSET_X, 0);
-
-    obs_data_set_default_int(s, S_OCC_OFFSET_Y, 0);
-
-    obs_data_set_default_int(s, S_OCC_W, 0);
-
-    obs_data_set_default_int(s, S_OCC_H, 0);
-
     obs_data_set_default_bool(s, S_SHOW_ROI, true);
 
     obs_data_set_default_int(s, S_ROI_THICK, 2);
@@ -1691,16 +1670,6 @@ static obs_properties_t *pd_properties(void *data)
 	obs_properties_add_int(props, S_BACK_FRAMES, "Back Frames", 0, 300, 1);
 
 	obs_properties_add_int(props, S_HOLD_FRAMES, "Hold Frames", 0, 300, 1);
-
-	obs_properties_add_bool(props, S_OCC_AUTO, "Occluder Auto Align (Right, V-Center)");
-
-	obs_properties_add_int(props, S_OCC_OFFSET_X, "Occluder Offset X (px)", -16384, 16384, 1);
-
-	obs_properties_add_int(props, S_OCC_OFFSET_Y, "Occluder Offset Y (px)", -16384, 16384, 1);
-
-	obs_properties_add_int(props, S_OCC_W, "Occluder Width (px)", 0, 16384, 1);
-
-	obs_properties_add_int(props, S_OCC_H, "Occluder Height (px)", 0, 16384, 1);
 
     // OCR settings
 
