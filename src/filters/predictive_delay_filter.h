@@ -15,9 +15,10 @@ const struct obs_source_info *get_predictive_delay_filter_info(void);
 
 // 外部接口（供 OCR 通知回填遮挡）
 // 参数 filter_instance 为滤镜实例指针（即 obs_source_t* 的私有 data 指针）
-void pd_backfill_range(void *filter_instance, unsigned long long from, unsigned long long to);
+void pd_backfill_range(void *filter_instance, unsigned long long from, unsigned long long to, uint32_t roi_mask);
 void pd_backfill_now(void *filter_instance, int back_frames, int hold_frames);
 
 #ifdef __cplusplus
 }
 #endif
+

@@ -20,7 +20,9 @@
 extern "C" void obs_log(int level, const char *format, ...);
 
 extern "C" void pd_backfill_now(void *filter_instance, int back_frames, int hold_frames);
-extern "C" void pd_backfill_range(void *filter_instance, unsigned long long from, unsigned long long to);
+extern "C" void pd_backfill_range(void *filter_instance, unsigned long long from, unsigned long long to, uint32_t roi_mask);
+
+static constexpr uint32_t k_roi_bits[3] = {1u << 0, 1u << 1, 1u << 2};
 
 OcrWorker::OcrWorker(void *filter_instance) : filter_instance_(filter_instance) {}
 OcrWorker::~OcrWorker() { stop(); }
@@ -89,8 +91,8 @@ void OcrWorker::run() {
       q_.pop();
     }
 
-    bool hit = infer_and_match(job.rois);
-    if (hit) {
+    uint32_t hits_mask = infer_and_match(job.rois);
+    if (hits_mask) {
       int back_frames = job.back_frames >= 0 ? job.back_frames : 0;
       int hold_frames = job.hold_frames >= 0 ? job.hold_frames : 0;
       uint64_t from = job.idx;
@@ -100,7 +102,7 @@ void OcrWorker::run() {
       }
       uint64_t to = job.idx + (uint64_t)hold_frames;
       if (to < job.idx) to = job.idx; // handle overflow
-      pd_backfill_range(filter_instance_, from, to);
+      pd_backfill_range(filter_instance_, from, to, hits_mask);
     }
   }
 }
@@ -289,8 +291,9 @@ void OcrWorker::pad_width(std::vector<float> &tensor, int c, int h, int cur_w, i
   tensor.swap(dst);
 }
 
-bool OcrWorker::infer_and_match(const std::array<OcrRoiImage,3> &rois) {
-  if (!ensure_init()) return false;
+uint32_t OcrWorker::infer_and_match(const std::array<OcrRoiImage,3> &rois) {
+  if (!ensure_init()) return 0;
+  uint32_t hits_mask = 0;
   // Build batch
   struct Sample { int w=0; std::vector<float> data; } s[3];
   int H = 48; int Wmax = 0; int N = 0;
@@ -300,7 +303,7 @@ bool OcrWorker::infer_and_match(const std::array<OcrRoiImage,3> &rois) {
     Wmax = std::max(Wmax, s[i].w);
     ++N;
   }
-  if (N == 0 || Wmax <= 0) return false;
+  if (N == 0 || Wmax <= 0) return 0;
   if (cfg_.debug_log) {
     obs_log(LOG_INFO, "[pd][ocr] batch N=%d H=%d Wmax=%d", N, H, Wmax);
   }
@@ -351,7 +354,7 @@ bool OcrWorker::infer_and_match(const std::array<OcrRoiImage,3> &rois) {
   auto output_handle = predictor_->GetOutputHandle(output_names[0]);
   std::vector<int> out_shape = output_handle->shape();
   // Expect [N, T, C] or [N, C, T]
-  if (out_shape.size() != 3) return false;
+  if (out_shape.size() != 3) return 0;
   int nN = (int)out_shape[0];
   int dim1 = (int)out_shape[1];
   int dim2 = (int)out_shape[2];
@@ -404,17 +407,30 @@ bool OcrWorker::infer_and_match(const std::array<OcrRoiImage,3> &rois) {
       prev = arg;
     }
     double conf_avg = conf_cnt ? (conf_sum / conf_cnt) : 0.0;
+    bool matched = false;
     if (cfg_.debug_log) {
       obs_log(LOG_INFO, "[pd][ocr] n=%d text='%s' conf=%.3f", n, s_out.c_str(), conf_avg);
     }
     if (!s_out.empty() && conf_avg >= 0.6) {
       for (const char *needle : kTargets) {
         if (s_out.find(needle) != std::string::npos) {
-          return true;
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (matched) {
+      if (n < (int)batch_index.size()) {
+        int roi_idx = batch_index[n];
+        if (roi_idx >= 0 && roi_idx < 3) {
+          hits_mask |= k_roi_bits[roi_idx];
+          if (cfg_.debug_log) {
+            obs_log(LOG_INFO, "[pd][ocr] ROI%d matched, mask=0x%X", roi_idx + 1, hits_mask);
+          }
         }
       }
     }
   }
-  return false;
+  return hits_mask;
 }
 

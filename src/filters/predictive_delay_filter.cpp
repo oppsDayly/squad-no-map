@@ -36,11 +36,28 @@
 
 #include <fstream>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
+
 #include "ocr/ocr_worker.h"
 
 #include "filters/predictive_delay_filter.h"
-
 #include "filters/occluder_builtin.h"
+
+#include <string>
+
+enum class pd_occluder_mode {
+    Image = 0,
+    Mosaic = 1,
+    GaussianBlur = 2,
+};
 
 #define S_DELAY_MS "pd_delay_ms"
 
@@ -54,6 +71,29 @@
 #define S_ROI_THICK "pd_roi_thickness"
 
 #define S_ROI_COLOR "pd_roi_color"
+#define S_OCC_MODE  "pd_occ_mode"
+#define S_OCC_BORDER "pd_show_occ_border"
+
+// Convert UTF-8 strings from OBS (which always uses UTF-8) into native filesystem paths.
+static std::filesystem::path pd_utf8_to_path(const std::string &utf8)
+{
+#if defined(_WIN32)
+	if (utf8.empty())
+		return {};
+	int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+	if (wlen <= 0)
+		return {};
+	std::wstring buffer;
+	buffer.resize((size_t)wlen);
+	int written = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, buffer.data(), wlen);
+	if (written <= 0)
+		return {};
+	buffer.resize((size_t)written - 1);
+	return std::filesystem::path(buffer);
+#else
+	return std::filesystem::path(utf8);
+#endif
+}
 
 // Built-in ROI rectangles defined in percent of frame dimensions
 static constexpr size_t k_roi_count = 3;
@@ -61,6 +101,29 @@ static constexpr double k_roi_x_defaults[k_roi_count] = {29.6, 25.8, 64.6};
 static constexpr double k_roi_y_defaults[k_roi_count] = {2.4, 12.0, 10.8};
 static constexpr double k_roi_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
 static constexpr double k_roi_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
+static constexpr double k_occ_x_defaults[k_roi_count] = {29.6, 25.8, 64.6};
+static constexpr double k_occ_y_defaults[k_roi_count] = {2.4, 12.0, 10.8};
+static constexpr double k_occ_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
+static constexpr double k_occ_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
+static constexpr int k_default_mosaic_block_px = 24;
+static constexpr int k_default_gaussian_strength = 6;
+static constexpr uint32_t k_roi1_bit = 1u << 0;
+static constexpr uint32_t k_roi2_bit = 1u << 1;
+static constexpr uint32_t k_roi3_bit = 1u << 2;
+static constexpr uint32_t k_roi12_mask = k_roi1_bit | k_roi2_bit;
+static constexpr uint32_t k_roi3_mask = k_roi3_bit;
+
+static const char *const k_roi_prop_x[k_roi_count] = {"pd_roi1_x_pct", "pd_roi2_x_pct", "pd_roi3_x_pct"};
+static const char *const k_roi_prop_y[k_roi_count] = {"pd_roi1_y_pct", "pd_roi2_y_pct", "pd_roi3_y_pct"};
+static const char *const k_roi_prop_w[k_roi_count] = {"pd_roi1_w_pct", "pd_roi2_w_pct", "pd_roi3_w_pct"};
+static const char *const k_roi_prop_h[k_roi_count] = {"pd_roi1_h_pct", "pd_roi2_h_pct", "pd_roi3_h_pct"};
+
+static const char *const k_occ_mosaic_props[k_roi_count] = {"pd_occ1_mosaic_px", "pd_occ2_mosaic_px", "pd_occ3_mosaic_px"};
+static const char *const k_occ_prop_x[k_roi_count] = {"pd_occ1_x_pct", "pd_occ2_x_pct", "pd_occ3_x_pct"};
+static const char *const k_occ_prop_y[k_roi_count] = {"pd_occ1_y_pct", "pd_occ2_y_pct", "pd_occ3_y_pct"};
+static const char *const k_occ_prop_w[k_roi_count] = {"pd_occ1_w_pct", "pd_occ2_w_pct", "pd_occ3_w_pct"};
+static const char *const k_occ_prop_h[k_roi_count] = {"pd_occ1_h_pct", "pd_occ2_h_pct", "pd_occ3_h_pct"};
+static const char *const k_occ_gauss_props[k_roi_count] = {"pd_occ1_gauss_strength", "pd_occ2_gauss_strength", "pd_occ3_gauss_strength"};
 
 #define S_ENABLE_OCR "pd_enable_ocr"
 
@@ -120,6 +183,19 @@ struct pd_filter_data {
 
 // -------------------- Retroactive occlusion (Scheme B) state --------------------
 
+struct pd_occ_region {
+    double x_pct = 0.0;
+    double y_pct = 0.0;
+    double w_pct = 0.0;
+    double h_pct = 0.0;
+    pd_occluder_mode mode = pd_occluder_mode::Mosaic;
+    int mosaic_block_px = k_default_mosaic_block_px;
+    int gaussian_strength = k_default_gaussian_strength;
+    char *image_path = nullptr;
+    gs_image_file_t image = {};
+    bool image_loaded = false;
+};
+
 struct pd_b_state {
 
     uint64_t next_index = 0;
@@ -128,21 +204,11 @@ struct pd_b_state {
 
     int hold_frames = 55;
 
-    uint32_t occ_w = 0;
+    pd_occ_region occ_regions[k_roi_count] = {};
 
-    uint32_t occ_h = 0;
+    uint32_t occ_pending_roi_mask = 0;
 
-    int occ_offset_x = 0;
-
-    int occ_offset_y = 0;
-
-    char *occ_path = nullptr;
-
-    gs_image_file_t occ_image = {};
-
-    bool occ_loaded = false;
-
-    bool occ_auto_align = true;
+    uint32_t occ_active_roi_mask = 0;
 
     bool has_pending_cmd = false;
 
@@ -167,6 +233,7 @@ struct pd_b_state {
     double roi_h_pct[k_roi_count] = {};
 
     bool show_roi = true;
+    bool show_occ_border = false;
 
     int roi_thickness = 2;
 
@@ -209,6 +276,351 @@ static inline void pd_apply_roi_defaults(pd_b_state *st)
     }
 }
 
+static inline void pd_apply_occ_defaults(pd_b_state *st)
+{
+    if (!st) return;
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        st->occ_regions[i].x_pct = k_occ_x_defaults[i];
+        st->occ_regions[i].y_pct = k_occ_y_defaults[i];
+        st->occ_regions[i].w_pct = k_occ_w_defaults[i];
+        st->occ_regions[i].h_pct = k_occ_h_defaults[i];
+        st->occ_regions[i].mode = pd_occluder_mode::Mosaic;
+        st->occ_regions[i].mosaic_block_px = k_default_mosaic_block_px;
+        st->occ_regions[i].gaussian_strength = k_default_gaussian_strength;
+    }
+}
+
+static inline void pd_draw_rect(float x, float y, float w, float h, uint32_t rgb, float alpha);
+
+static void pd_draw_front(struct pd_filter_data *f, pd_b_state *st);
+struct pd_occ_rect;
+
+static void pd_draw_roi_boxes(struct pd_filter_data *f, pd_b_state *st);
+
+static void pd_draw_occ_boxes(struct pd_filter_data *f, pd_b_state *st);
+
+static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, uint64_t frame_index,
+                                     gs_texture_t *frame_tex, enum gs_color_space frame_space);
+
+struct occ_res;
+static inline occ_res *occ_get(void *key);
+static inline void occ_release(void *key);
+static inline void occ_ensure(occ_res *res, size_t idx, uint32_t w, uint32_t h);
+
+struct pd_occ_rect {
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+};
+
+static inline double pd_sanitize_pct(double value)
+{
+    if (!std::isfinite(value))
+        return 0.0;
+    return std::clamp(value, 0.0, 100.0);
+}
+
+static bool pd_compute_occ_rect(const pd_occ_region &region, uint32_t frame_w, uint32_t frame_h, pd_occ_rect &out)
+{
+    if (!frame_w || !frame_h)
+        return false;
+
+    double x_pct = pd_sanitize_pct(region.x_pct);
+    double y_pct = pd_sanitize_pct(region.y_pct);
+    double w_pct = pd_sanitize_pct(region.w_pct);
+    double h_pct = pd_sanitize_pct(region.h_pct);
+
+    double max_w_pct = std::max(0.0, 100.0 - x_pct);
+    double max_h_pct = std::max(0.0, 100.0 - y_pct);
+    w_pct = std::clamp(w_pct, 0.0, max_w_pct);
+    h_pct = std::clamp(h_pct, 0.0, max_h_pct);
+
+    int x = (int)std::lround(x_pct * 0.01 * (double)frame_w);
+    int y = (int)std::lround(y_pct * 0.01 * (double)frame_h);
+    int w = (int)std::lround(w_pct * 0.01 * (double)frame_w);
+    int h = (int)std::lround(h_pct * 0.01 * (double)frame_h);
+
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    if (x >= (int)frame_w || y >= (int)frame_h)
+        return false;
+
+    if (w <= 0 || h <= 0)
+        return false;
+
+    if (x + w > (int)frame_w)
+        w = (int)frame_w - x;
+    if (y + h > (int)frame_h)
+        h = (int)frame_h - y;
+
+    if (w <= 0 || h <= 0)
+        return false;
+
+    out.x = x;
+    out.y = y;
+    out.w = w;
+    out.h = h;
+    return true;
+}
+
+static void pd_occ_region_release_image(pd_occ_region &region)
+{
+    if (region.image.texture || region.image_loaded) {
+        obs_enter_graphics();
+        gs_image_file_free(&region.image);
+        obs_leave_graphics();
+    }
+    region.image = {};
+    region.image_loaded = false;
+}
+
+static void pd_occ_region_set_image_path(pd_occ_region &region, const char *path)
+{
+    if (region.image_path) {
+        bfree(region.image_path);
+        region.image_path = nullptr;
+    }
+    if (path && *path)
+        region.image_path = bstrdup(path);
+}
+
+static void pd_occ_region_load_image(pd_occ_region &region, size_t idx, bool debug_log)
+{
+    pd_occ_region_release_image(region);
+    if (!region.image_path || !*region.image_path)
+        return;
+
+    gs_image_file_init(&region.image, region.image_path);
+    obs_enter_graphics();
+    gs_image_file_init_texture(&region.image);
+    obs_leave_graphics();
+    region.image_loaded = region.image.loaded && region.image.texture != nullptr;
+    if (!region.image_loaded) {
+        obs_log(LOG_WARNING, "[pd][occ] failed to load image for ROI%zu: %s",
+                idx + 1, region.image_path);
+        return;
+    }
+    if (debug_log) {
+        obs_log(LOG_INFO, "[pd][occ] loaded image for ROI%zu: %s (%ux%u)",
+                idx + 1, region.image_path, (unsigned)region.image.cx, (unsigned)region.image.cy);
+    }
+}
+
+static std::string pd_extract_builtin_image(size_t idx)
+{
+    if (!k_builtin_occluder_count)
+        return {};
+    size_t actual = (idx < k_builtin_occluder_count) ? idx : (k_builtin_occluder_count - 1);
+    const auto &def = k_builtin_occluders[actual];
+    char *utf8 = obs_module_file(def.filename);
+    if (!utf8) {
+        obs_log(LOG_ERROR, "[pd][occ] failed to resolve builtin image path for idx=%zu", idx);
+        return {};
+    }
+    std::string path = utf8;
+    bfree(utf8);
+
+    const std::filesystem::path native = pd_utf8_to_path(path);
+    const std::filesystem::path parent = native.parent_path();
+    std::error_code ec;
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            obs_log(LOG_ERROR, "[pd][occ] failed to create directory for %s", path.c_str());
+            return {};
+        }
+    }
+
+    std::ofstream ofs(native, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+        obs_log(LOG_ERROR, "[pd][occ] failed to open builtin image for write: %s", path.c_str());
+        return {};
+    }
+    ofs.write(reinterpret_cast<const char *>(def.data), static_cast<std::streamsize>(def.size));
+    if (!ofs) {
+        obs_log(LOG_ERROR, "[pd][occ] failed to write builtin image: %s", path.c_str());
+        return {};
+    }
+    return path;
+}
+
+static gs_samplerstate_t *g_sampler_point = nullptr;
+static gs_samplerstate_t *g_sampler_linear = nullptr;
+static std::mutex g_sampler_mu;
+
+static gs_samplerstate_t *pd_get_sampler(bool point)
+{
+    std::lock_guard<std::mutex> lk(g_sampler_mu);
+    gs_samplerstate_t **slot = point ? &g_sampler_point : &g_sampler_linear;
+    if (*slot)
+        return *slot;
+
+    struct gs_sampler_info info = {};
+    info.filter = point ? GS_FILTER_POINT : GS_FILTER_LINEAR;
+    info.address_u = GS_ADDRESS_CLAMP;
+    info.address_v = GS_ADDRESS_CLAMP;
+    info.address_w = GS_ADDRESS_CLAMP;
+
+    obs_enter_graphics();
+    *slot = gs_samplerstate_create(&info);
+    obs_leave_graphics();
+    return *slot;
+}
+
+static void pd_release_samplers()
+{
+    std::lock_guard<std::mutex> lk(g_sampler_mu);
+    if (g_sampler_point || g_sampler_linear) {
+        obs_enter_graphics();
+        if (g_sampler_point) {
+            gs_samplerstate_destroy(g_sampler_point);
+            g_sampler_point = nullptr;
+        }
+        if (g_sampler_linear) {
+            gs_samplerstate_destroy(g_sampler_linear);
+            g_sampler_linear = nullptr;
+        }
+        obs_leave_graphics();
+    }
+}
+
+struct occ_res {
+    gs_texrender_t *downsample[k_roi_count] = {nullptr, nullptr, nullptr};
+    uint32_t w[k_roi_count] = {0,0,0};
+    uint32_t h[k_roi_count] = {0,0,0};
+};
+
+static std::mutex g_occ_mu;
+static std::unordered_map<void*, occ_res*> g_occ_map;
+
+static inline occ_res *occ_get(void *key)
+{
+    std::lock_guard<std::mutex> lk(g_occ_mu);
+    auto it = g_occ_map.find(key);
+    if (it != g_occ_map.end())
+        return it->second;
+    occ_res *res = (occ_res *)bzalloc(sizeof(occ_res));
+    g_occ_map[key] = res;
+    return res;
+}
+
+static inline void occ_release(void *key)
+{
+    std::lock_guard<std::mutex> lk(g_occ_mu);
+    auto it = g_occ_map.find(key);
+    if (it == g_occ_map.end())
+        return;
+    occ_res *res = it->second;
+    obs_enter_graphics();
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        if (res->downsample[i])
+            gs_texrender_destroy(res->downsample[i]);
+    }
+    obs_leave_graphics();
+    bfree(res);
+    g_occ_map.erase(it);
+}
+
+static inline void occ_ensure(occ_res *res, size_t idx, uint32_t w, uint32_t h)
+{
+    if (!res || idx >= k_roi_count || w == 0 || h == 0)
+        return;
+    bool need_new = (!res->downsample[idx]) || res->w[idx] != w || res->h[idx] != h;
+    if (!need_new)
+        return;
+    obs_enter_graphics();
+    if (res->downsample[idx])
+        gs_texrender_destroy(res->downsample[idx]);
+    res->downsample[idx] = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+    res->w[idx] = w;
+    res->h[idx] = h;
+    obs_leave_graphics();
+}
+
+static bool pd_capture_roi_to_target(gs_texrender_t *target, uint32_t target_w, uint32_t target_h,
+                                     enum gs_color_space space, gs_texture_t *frame_tex,
+                                     const pd_occ_rect &rect, uint32_t frame_w, uint32_t frame_h)
+{
+    if (!target || !frame_tex || target_w == 0 || target_h == 0 || rect.w <= 0 || rect.h <= 0)
+        return false;
+
+    gs_texrender_reset(target);
+    gs_blend_state_push();
+    gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+    bool ok = false;
+    if (gs_texrender_begin_with_color_space(target, target_w, target_h, space)) {
+        struct vec4 clear_color; vec4_zero(&clear_color);
+        gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+        gs_ortho(0.0f, (float)rect.w, 0.0f, (float)rect.h, -100.0f, 100.0f);
+
+        gs_matrix_push();
+        gs_matrix_identity();
+        gs_matrix_translate3f(-(float)rect.x, -(float)rect.y, 0.0f);
+
+        gs_effect_t *copy_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+        gs_effect_set_texture_srgb(gs_effect_get_param_by_name(copy_effect, "image"), frame_tex);
+        while (gs_effect_loop(copy_effect, "Draw")) {
+            gs_draw_sprite(frame_tex, 0, frame_w, frame_h);
+        }
+        gs_matrix_pop();
+
+        gs_texrender_end(target);
+        ok = true;
+    }
+    gs_blend_state_pop();
+    return ok;
+}
+
+static bool pd_draw_downsampled_region(struct pd_filter_data *f, gs_texture_t *frame_tex,
+                                       enum gs_color_space frame_space, const pd_occ_rect &rect,
+                                       occ_res *gfx, size_t roi_index, uint32_t down_w, uint32_t down_h,
+                                       bool point_sample)
+{
+    if (!f || !frame_tex || !gfx || roi_index >= k_roi_count)
+        return false;
+    if (down_w == 0 || down_h == 0)
+        return false;
+
+    occ_ensure(gfx, roi_index, down_w, down_h);
+    gs_texrender_t *tmp = gfx->downsample[roi_index];
+    if (!tmp)
+        return false;
+
+    if (!pd_capture_roi_to_target(tmp, down_w, down_h, frame_space, frame_tex, rect, f->cx, f->cy))
+        return false;
+
+    gs_texture_t *down_tex = gs_texrender_get_texture(tmp);
+    if (!down_tex)
+        return false;
+
+    gs_effect_t *draw_effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+    gs_eparam_t *image_param = gs_effect_get_param_by_name(draw_effect, "image");
+    if (point_sample) {
+        if (auto *sampler = pd_get_sampler(true))
+            gs_effect_set_next_sampler(image_param, sampler);
+    } else {
+        if (auto *sampler = pd_get_sampler(false))
+            gs_effect_set_next_sampler(image_param, sampler);
+    }
+    gs_effect_set_texture_srgb(image_param, down_tex);
+
+    gs_matrix_push();
+    gs_matrix_identity();
+    gs_matrix_translate3f((float)rect.x, (float)rect.y, 0.0f);
+    gs_matrix_scale3f((float)rect.w / (float)down_w, (float)rect.h / (float)down_h, 1.0f);
+
+    bool drew = false;
+    while (gs_effect_loop(draw_effect, "Draw")) {
+        gs_draw_sprite(down_tex, 0, down_w, down_h);
+        drew = true;
+    }
+    gs_matrix_pop();
+    return drew;
+}
+
 static inline bool pd_check_size(struct pd_filter_data *f);
 
 static void pd_check_interval(struct pd_filter_data *f);
@@ -216,8 +628,6 @@ static void pd_check_interval(struct pd_filter_data *f);
 static pd_b_state *pd_get_state(void *key);
 
 static size_t pd_num_frames(struct deque *buf);
-
-static inline void pd_state_load_occluder(pd_b_state *s, const char *path);
 
 static size_t pd_num_frames(struct deque *buf)
 
@@ -239,95 +649,190 @@ static const char *pd_get_name(void *unused)
 
 }
 
-static std::string pd_builtin_occluder_storage_path()
-{
-
-    char *module_path = obs_module_config_path("builtin_occluder.jpg");
-
-    if (!module_path) {
-
-        return std::string();
-
-    }
-
-    std::string path = module_path;
-
-    bfree(module_path);
-
-    return path;
-
-}
-
-static bool pd_write_builtin_occluder_file(const std::string &path)
-{
-
-    std::error_code ec;
-
-    std::filesystem::path p(path);
-
-    if (!p.parent_path().empty()) {
-
-        std::filesystem::create_directories(p.parent_path(), ec);
-
-        if (ec) {
-
-            obs_log(LOG_ERROR, "[pd][occ] failed to create builtin occluder directory: %s", path.c_str());
-
-            return false;
-
-        }
-
-    }
-
-    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
-
-    if (!ofs) {
-
-        obs_log(LOG_ERROR, "[pd][occ] failed to open builtin occluder: %s", path.c_str());
-
-        return false;
-
-    }
-
-    ofs.write(reinterpret_cast<const char *>(g_builtin_occluder), static_cast<std::streamsize>(g_builtin_occluder_size));
-
-    if (!ofs) {
-
-        obs_log(LOG_ERROR, "[pd][occ] failed to write builtin occluder: %s", path.c_str());
-
-        return false;
-
-    }
-
-    ofs.close();
-
-    return true;
-
-}
-
-static std::string pd_get_builtin_occluder_path()
-{
-
-    std::string path = pd_builtin_occluder_storage_path();
-
-    if (path.empty())
-
-        return std::string();
-
-    if (!pd_write_builtin_occluder_file(path))
-
-        return std::string();
-
-    return path;
-
-}
-
-
 static void pd_tick(void *data, float t);
 
 static void pd_defaults(obs_data_t *s);
 
-static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, uint64_t frame_index);
+
+static void pd_draw_front(struct pd_filter_data *f, pd_b_state *st)
+{
+
+    if (!f || !f->context)
+        return;
+
+    if (!f->frames.size) {
+        obs_source_skip_video_filter(f->context);
+        return;
+    }
+
+    struct pd_frame frame;
+    deque_peek_front(&f->frames, &frame, sizeof(frame));
+
+    gs_texture_t *tex = gs_texrender_get_texture(frame.render);
+    if (!tex) {
+        obs_source_skip_video_filter(f->context);
+        return;
+    }
+
+    gs_blend_state_push();
+    gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+    gs_ortho(0.0f, (float)f->cx, 0.0f, (float)f->cy, -100.0f, 100.0f);
+
+    const bool prev_srgb = gs_framebuffer_srgb_enabled();
+    gs_enable_framebuffer_srgb(true);
+
+    gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+    gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), tex);
+
+    gs_matrix_push();
+    gs_matrix_identity();
+
+    while (gs_effect_loop(effect, "Draw")) {
+        gs_draw_sprite(tex, 0, 0, 0);
+    }
+
+    gs_matrix_pop();
+
+    gs_enable_framebuffer_srgb(prev_srgb);
+    gs_blend_state_pop();
+
+    if (st)
+        st->last_present_index = frame.index;
+
+    pd_draw_occluder_overlay(f, st, frame.index, tex, frame.space);
+}
+
+
+static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, uint64_t frame_index, gs_texture_t *frame_tex, enum gs_color_space frame_space)
+{
+
+    if (!st || !st->occ_active)
+        return;
+
+    if (frame_index < st->occ_active_from || frame_index > st->occ_active_to)
+        return;
+
+    if (!frame_tex)
+        return;
+
+    gs_blend_state_push();
+    gs_enable_blending(true);
+    gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
+    gs_ortho(0.0f, (float)f->cx, 0.0f, (float)f->cy, -100.0f, 100.0f);
+
+    const bool prev = gs_framebuffer_srgb_enabled();
+    gs_enable_framebuffer_srgb(true);
+
+    const int frame_w = (int)f->cx;
+    const int frame_h = (int)f->cy;
+
+    uint32_t active_mask = st->occ_active_roi_mask;
+    if (!active_mask) {
+        gs_enable_framebuffer_srgb(prev);
+        gs_blend_state_pop();
+        return;
+    }
+
+    occ_res *gfx = occ_get(f);
+
+    for (size_t roi = 0; roi < k_roi_count; ++roi) {
+        if ((active_mask & (1u << roi)) == 0)
+            continue;
+
+        pd_occ_rect rect;
+        if (!pd_compute_occ_rect(st->occ_regions[roi], frame_w, frame_h, rect))
+            continue;
+
+        const pd_occ_region &region = st->occ_regions[roi];
+        bool drew = false;
+
+        switch (region.mode) {
+        case pd_occluder_mode::Image:
+            if (region.image_loaded && region.image.texture) {
+                const float tex_w = (float)region.image.cx;
+                const float tex_h = (float)region.image.cy;
+                if (tex_w > 0.0f && tex_h > 0.0f) {
+                    float scale = std::min((float)rect.w / tex_w, (float)rect.h / tex_h);
+                    if (!std::isfinite(scale) || scale <= 0.0f)
+                        scale = 1.0f;
+                    float draw_w = tex_w * scale;
+                    float draw_h = tex_h * scale;
+                    if (draw_w <= 0.0f || draw_h <= 0.0f)
+                        break;
+                    float offset_x = (float)rect.x + ((float)rect.w - draw_w) * 0.5f;
+                    float offset_y = (float)rect.y + ((float)rect.h - draw_h) * 0.5f;
+
+                    gs_effect_t *e = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+                    gs_effect_set_texture_srgb(gs_effect_get_param_by_name(e, "image"), region.image.texture);
+
+                    gs_matrix_push();
+                    gs_matrix_identity();
+                    gs_matrix_translate3f(offset_x, offset_y, 0.0f);
+
+                    while (gs_effect_loop(e, "Draw")) {
+                        gs_draw_sprite(region.image.texture, 0,
+                                       (uint32_t)std::round(draw_w),
+                                       (uint32_t)std::round(draw_h));
+                        drew = true;
+                    }
+
+                    gs_matrix_pop();
+
+                    if (st->debug_log) {
+                        obs_log(LOG_INFO, "[pd][occ] roi%zu image cover drawn at (%d,%d,%d,%d)",
+                                roi + 1, rect.x, rect.y, rect.w, rect.h);
+                    }
+                }
+            }
+            break;
+        case pd_occluder_mode::Mosaic: {
+            int block = region.mosaic_block_px <= 0 ? 1 : region.mosaic_block_px;
+            uint32_t down_w = (uint32_t)std::max(1, (rect.w + block - 1) / block);
+            uint32_t down_h = (uint32_t)std::max(1, (rect.h + block - 1) / block);
+            down_w = std::min<uint32_t>(down_w, (uint32_t)rect.w);
+            down_h = std::min<uint32_t>(down_h, (uint32_t)rect.h);
+            drew = pd_draw_downsampled_region(f, frame_tex, frame_space, rect, gfx, roi, down_w, down_h, true);
+            if (st->debug_log) {
+                obs_log(LOG_INFO, "[pd][occ] roi%zu mosaic drawn at (%d,%d,%d,%d) block=%d",
+                        roi + 1, rect.x, rect.y, rect.w, rect.h, block);
+            }
+            break;
+        }
+        case pd_occluder_mode::GaussianBlur: {
+            int strength = std::max(1, region.gaussian_strength);
+            uint32_t down_w = std::max<uint32_t>(1u, (uint32_t)rect.w / (uint32_t)strength);
+            uint32_t down_h = std::max<uint32_t>(1u, (uint32_t)rect.h / (uint32_t)strength);
+            drew = pd_draw_downsampled_region(f, frame_tex, frame_space, rect, gfx, roi, down_w, down_h, false);
+            if (st->debug_log) {
+                obs_log(LOG_INFO, "[pd][occ] roi%zu gaussian blur drawn at (%d,%d,%d,%d) strength=%d",
+                        roi + 1, rect.x, rect.y, rect.w, rect.h, strength);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+
+        if (!drew) {
+            gs_matrix_push();
+            gs_matrix_identity();
+            gs_matrix_translate3f((float)rect.x, (float)rect.y, 0.0f);
+            pd_draw_rect(0.0f, 0.0f, (float)rect.w, (float)rect.h, 0x000000, 0.85f);
+            gs_matrix_pop();
+            if (st->debug_log) {
+                obs_log(LOG_INFO, "[pd][occ] roi%zu fallback rect drawn at (%d,%d,%d,%d)",
+                        roi + 1, rect.x, rect.y, rect.w, rect.h);
+            }
+        }
+
+    }
+
+    gs_enable_framebuffer_srgb(prev);
+
+    gs_blend_state_pop();
+}
+
+
 
 static inline void pd_draw_rect(float x, float y, float w, float h, uint32_t rgb, float alpha)
 {
@@ -429,179 +934,40 @@ static void pd_draw_roi_boxes(struct pd_filter_data *f, pd_b_state *st)
 
 }
 
-static void pd_draw_front(struct pd_filter_data *f, pd_b_state *st)
+static void pd_draw_occ_boxes(struct pd_filter_data *f, pd_b_state *st)
 {
-
-    if (!f || !f->context)
+    if (!f || !st || !st->show_occ_border)
+        return;
+    if (f->cx == 0 || f->cy == 0)
         return;
 
-    if (!f->frames.size) {
-        obs_source_skip_video_filter(f->context);
-        return;
+    const int thickness = std::max(1, st->roi_thickness);
+    const uint32_t color = st->roi_color;
+    const float alpha = 1.0f;
+
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        pd_occ_rect rect;
+        if (!pd_compute_occ_rect(st->occ_regions[i], f->cx, f->cy, rect))
+            continue;
+
+        float t = (float)thickness;
+        float x = (float)rect.x;
+        float y = (float)rect.y;
+        float w = (float)rect.w;
+        float h = (float)rect.h;
+
+        if (t > w) t = w;
+        if (t > h) t = h;
+
+        pd_draw_rect(x, y, w, t, color, alpha);
+        pd_draw_rect(x, y + h - t, w, t, color, alpha);
+        pd_draw_rect(x, y, t, h, color, alpha);
+        pd_draw_rect(x + w - t, y, t, h, color, alpha);
     }
-
-    struct pd_frame frame;
-    deque_peek_front(&f->frames, &frame, sizeof(frame));
-
-    gs_texture_t *tex = gs_texrender_get_texture(frame.render);
-    if (!tex) {
-        obs_source_skip_video_filter(f->context);
-        return;
-    }
-
-    gs_blend_state_push();
-    gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-    gs_ortho(0.0f, (float)f->cx, 0.0f, (float)f->cy, -100.0f, 100.0f);
-
-    const bool prev_srgb = gs_framebuffer_srgb_enabled();
-    gs_enable_framebuffer_srgb(true);
-
-    gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-    gs_effect_set_texture_srgb(gs_effect_get_param_by_name(effect, "image"), tex);
-
-    gs_matrix_push();
-    gs_matrix_identity();
-
-    while (gs_effect_loop(effect, "Draw")) {
-        gs_draw_sprite(tex, 0, 0, 0);
-    }
-
-    gs_matrix_pop();
-
-    gs_enable_framebuffer_srgb(prev_srgb);
-    gs_blend_state_pop();
-
-    if (st)
-        st->last_present_index = frame.index;
-
-    pd_draw_occluder_overlay(f, st, frame.index);
-
 }
-static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, uint64_t frame_index)
-{
 
-    if (!st || !st->occ_active)
-        return;
 
-    if (frame_index < st->occ_active_from || frame_index > st->occ_active_to)
-        return;
 
-    if ((!st->occ_loaded || !st->occ_image.texture) && st->occ_path && *st->occ_path) {
-        if (st->debug_log) {
-            obs_log(LOG_INFO, "[pd][occ] reload request (loaded=%s, texture=%p)",
-                    st->occ_loaded ? "true" : "false", st->occ_image.texture);
-        }
-
-        st->occ_loaded = false;
-        pd_state_load_occluder(st, st->occ_path);
-
-        if (st->debug_log) {
-            obs_log(LOG_INFO, "[pd][occ] reload result (loaded=%s, texture=%p, size=%ux%u)",
-                    st->occ_loaded ? "true" : "false", st->occ_image.texture,
-                    (unsigned)st->occ_image.cx, (unsigned)st->occ_image.cy);
-        }
-    }
-
-    gs_blend_state_push();
-    gs_enable_blending(true);
-    gs_blend_function(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA);
-    gs_ortho(0.0f, (float)f->cx, 0.0f, (float)f->cy, -100.0f, 100.0f);
-
-    const bool prev = gs_framebuffer_srgb_enabled();
-    gs_enable_framebuffer_srgb(true);
-
-    double roi2_left_pct = (k_roi_count >= 2) ? st->roi_x_pct[1] : 0.0;
-    roi2_left_pct = std::clamp(roi2_left_pct, 0.0, 100.0);
-    int roi2_left_px = (int)std::lround(roi2_left_pct * 0.01 * (double)f->cx);
-    roi2_left_px = std::clamp(roi2_left_px, 0, (int)f->cx);
-
-    int target_w = (int)f->cx - roi2_left_px;
-    if (target_w <= 0)
-        target_w = (int)f->cx;
-
-    int target_h = (int)f->cy;
-    if (target_h <= 0)
-        target_h = (st->occ_loaded && st->occ_image.cy > 0) ? (int)st->occ_image.cy : 1;
-
-    int draw_x = roi2_left_px + st->occ_offset_x;
-    int draw_y = st->occ_offset_y;
-
-    if ((int)f->cx > 0) {
-        if (draw_x < 0)
-            draw_x = 0;
-        if (draw_x + target_w > (int)f->cx)
-            draw_x = std::max(0, (int)f->cx - target_w);
-    }
-
-    if ((int)f->cy > 0) {
-        if (draw_y < 0)
-            draw_y = 0;
-        if (draw_y + target_h > (int)f->cy)
-            draw_y = std::max(0, (int)f->cy - target_h);
-    }
-
-    bool drew_cover = false;
-
-    if (st->occ_loaded && st->occ_image.texture && target_w > 0 && target_h > 0) {
-        gs_effect_t *e = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-        gs_effect_set_texture_srgb(gs_effect_get_param_by_name(e, "image"), st->occ_image.texture);
-
-        gs_matrix_push();
-        gs_matrix_identity();
-        gs_matrix_translate3f((float)draw_x, (float)draw_y, 0.0f);
-
-        bool drew = false;
-
-        while (gs_effect_loop(e, "Draw")) {
-            gs_draw_sprite(st->occ_image.texture, 0, target_w, target_h);
-            drew = true;
-        }
-
-        gs_matrix_pop();
-
-        drew_cover = drew;
-
-        if (st->debug_log) {
-            obs_log(LOG_INFO, "[pd][occ] draw texture=%p dst=(%d,%d,%d,%d)",
-                    st->occ_image.texture, draw_x, draw_y, target_w, target_h);
-        }
-
-        if (st->debug_log && !drew)
-            obs_log(LOG_WARNING, "[pd][occ] effect loop did not draw texture");
-    }
-
-    if (!drew_cover && target_w > 0 && target_h > 0) {
-        gs_matrix_push();
-        gs_matrix_identity();
-        gs_matrix_translate3f((float)draw_x, (float)draw_y, 0.0f);
-
-        pd_draw_rect(0.0f, 0.0f, (float)target_w, (float)target_h, 0x000000, 0.85f);
-
-        gs_matrix_pop();
-        drew_cover = true;
-
-        if (st->debug_log) {
-            obs_log(LOG_INFO, "[pd][occ] fallback rect drawn at (%d,%d,%d,%d)",
-                    draw_x, draw_y, target_w, target_h);
-        }
-    }
-
-    if (!drew_cover && st->debug_log) {
-        if (st->occ_path && *st->occ_path)
-            obs_log(LOG_WARNING, "[pd][occ] occluder image unavailable: %s", st->occ_path);
-        else
-            obs_log(LOG_DEBUG, "[pd][occ] occluder draw skipped (no image/rect)");
-    }
-
-    if (st->debug_log) {
-        obs_log(LOG_INFO, "[pd][occ] overlay %s for frame %llu", drew_cover ? "applied" : "skipped",
-                (unsigned long long)frame_index);
-    }
-
-    gs_enable_framebuffer_srgb(prev);
-
-    gs_blend_state_pop();
-}
 
 
 static std::mutex g_b_state_mu;
@@ -622,6 +988,7 @@ static inline pd_b_state *pd_get_state(void *key)
 
     g_b_states[key] = s;
     pd_apply_roi_defaults(s);
+    pd_apply_occ_defaults(s);
 
     return s;
 
@@ -639,115 +1006,34 @@ static inline void pd_release_state(void *key)
 
         pd_b_state *s = it->second;
 
-        if (s->occ_path) bfree(s->occ_path);
+        for (size_t i = 0; i < k_roi_count; ++i) {
+            pd_occ_region &region = s->occ_regions[i];
+            pd_occ_region_release_image(region);
+            if (region.image_path) {
+                bfree(region.image_path);
+                region.image_path = nullptr;
+            }
+        }
 
         if (s->model_dir) bfree(s->model_dir);
 
         if (s->dict_path) bfree(s->dict_path);
 
-        if (s->occ_loaded) {
-
-            obs_enter_graphics();
-
-            gs_image_file_free(&s->occ_image);
-
-            obs_leave_graphics();
-
-        }
-
         bfree(s);
 
         g_b_states.erase(it);
+        if (g_b_states.empty())
+            pd_release_samplers();
 
     }
 
 }
 
-static inline void pd_state_load_occluder(pd_b_state *s, const char *path_in)
-{
 
-    if (!s)
-        return;
-
-    std::string requested_path = path_in ? std::string(path_in) : std::string();
-
-    std::string current_path = s->occ_path ? std::string(s->occ_path) : std::string();
-
-    if (s->occ_loaded && !requested_path.empty() && requested_path == current_path)
-        return;
-
-    if (s->occ_loaded) {
-
-        obs_enter_graphics();
-
-        gs_image_file_free(&s->occ_image);
-
-        obs_leave_graphics();
-
-        s->occ_loaded = false;
-
-    }
-
-    if (s->occ_path) { bfree(s->occ_path); s->occ_path = nullptr; }
-
-    if (requested_path.empty())
-        return;
-
-    std::string builtin_path = pd_builtin_occluder_storage_path();
-
-    bool using_builtin = false;
-
-    if (!builtin_path.empty() && requested_path == builtin_path) {
-
-        std::string prepared_path = pd_get_builtin_occluder_path();
-
-        if (prepared_path.empty()) {
-
-            obs_log(LOG_ERROR, "[pd][occ] unable to prepare builtin occluder file");
-
-            return;
-
-        }
-
-        requested_path = prepared_path;
-
-        using_builtin = true;
-
-    }
-
-    s->occ_path = bstrdup(requested_path.c_str());
-
-    gs_image_file_init(&s->occ_image, s->occ_path);
-
-    obs_enter_graphics();
-
-    gs_image_file_init_texture(&s->occ_image);
-
-    obs_leave_graphics();
-
-    s->occ_loaded = s->occ_image.loaded && s->occ_image.texture != nullptr;
-
-    obs_log(LOG_INFO, "[pd] occluder %s: %s", s->occ_loaded ? "loaded" : "failed", s->occ_path);
-
-    if (using_builtin) {
-
-        std::error_code rm_ec;
-
-        std::filesystem::remove(requested_path, rm_ec);
-
-        if (rm_ec) {
-
-            obs_log(LOG_WARNING, "[pd][occ] failed to remove builtin occluder file: %s", requested_path.c_str());
-
-        }
-
-    }
-
-}
 
 // External API: schedule backfill from OCR thread (or any caller)
 
-extern "C" void pd_backfill_range(void *filter_instance, unsigned long long from, unsigned long long to)
+extern "C" void pd_backfill_range(void *filter_instance, unsigned long long from, unsigned long long to, uint32_t roi_mask)
 
 {
 
@@ -758,6 +1044,8 @@ extern "C" void pd_backfill_range(void *filter_instance, unsigned long long from
     st->pending_from = (uint64_t)from;
 
     st->pending_to = (uint64_t)to;
+
+    st->occ_pending_roi_mask = roi_mask;
 
     st->has_pending_cmd = true;
 
@@ -780,6 +1068,8 @@ extern "C" void pd_backfill_now(void *filter_instance, int back_frames, int hold
     st->pending_from = from;
 
     st->pending_to = to;
+
+    st->occ_pending_roi_mask = k_roi12_mask;
 
     st->has_pending_cmd = true;
 
@@ -1341,11 +1631,17 @@ static void pd_tick(void *data, float t)
 
         st->occ_active_to = st->pending_to;
 
+        st->occ_active_roi_mask = st->occ_pending_roi_mask ? st->occ_pending_roi_mask : k_roi12_mask;
+
+        st->occ_pending_roi_mask = 0;
+
         st->has_pending_cmd = false;
 
         if (st->debug_log) {
 
-            obs_log(LOG_INFO, "[pd][occ] activate range [%llu, %llu]", (unsigned long long)st->occ_active_from, (unsigned long long)st->occ_active_to);
+            obs_log(LOG_INFO, "[pd][occ] activate range [%llu, %llu] mask=0x%X",
+                    (unsigned long long)st->occ_active_from, (unsigned long long)st->occ_active_to,
+                    st->occ_active_roi_mask);
 
         }
 
@@ -1354,6 +1650,8 @@ static void pd_tick(void *data, float t)
     if (st->occ_active && st->last_present_index >= st->occ_active_to) {
 
         st->occ_active = false;
+
+        st->occ_active_roi_mask = 0;
 
         if (st->debug_log) {
 
@@ -1515,75 +1813,95 @@ static void pd_update(void *data, obs_data_t *s)
 
     obs_log(LOG_INFO, "[pd] update: delay_ms=%lld", (long long)obs_data_get_int(s, S_DELAY_MS));
 
-    // update occlusion state
-
     pd_b_state *st = pd_get_state(f);
-    pd_apply_roi_defaults(st);
 
     st->back_frames = (int)obs_data_get_int(s, S_BACK_FRAMES);
-
     st->hold_frames = (int)obs_data_get_int(s, S_HOLD_FRAMES);
-
-    st->occ_offset_x = 0;
-
-    st->occ_offset_y = 0;
-
-    st->occ_w = 0;
-
-    st->occ_h = 0;
-
-    st->occ_auto_align = true;
-
-    if (st->occ_path) { bfree(st->occ_path); st->occ_path = nullptr; }
-
-    std::string builtin_path = pd_builtin_occluder_storage_path();
-
-    pd_state_load_occluder(st, builtin_path.empty() ? nullptr : builtin_path.c_str());
-
-    // ROI overlay
+    st->occ_pending_roi_mask = 0;
+    st->occ_active_roi_mask = 0;
+    st->occ_active = false;
+    st->occ_active_from = 0;
+    st->occ_active_to = 0;
+    st->has_pending_cmd = false;
+    st->pending_from = 0;
+    st->pending_to = 0;
 
     st->show_roi = obs_data_get_bool(s, S_SHOW_ROI);
-
     st->roi_thickness = (int)obs_data_get_int(s, S_ROI_THICK);
-
     st->roi_color = (uint32_t)obs_data_get_int(s, S_ROI_COLOR);
-
-    // OCR settings
-
-    st->enable_ocr = obs_data_get_bool(s, S_ENABLE_OCR);
-
-    st->ocr_interval_ms = (int)obs_data_get_int(s, S_OCR_INTERVAL_MS);
-
-    if (st->ocr_interval_ms < 0) st->ocr_interval_ms = 0;
-
-    st->next_ocr_allowed_time_ns = 0;
-
-    st->cpu_threads = (int)obs_data_get_int(s, S_CPU_THREADS);
-
-    if (st->cpu_threads < 1) st->cpu_threads = 1;
-
-    st->gpu_id = (int)obs_data_get_int(s, S_GPU_ID);
-
-    st->gpu_mem_mb = (int)obs_data_get_int(s, S_GPU_MEM);
-
-    st->conf_threshold = obs_data_get_double(s, S_CONF_THR);
-
-    if (st->model_dir) { bfree(st->model_dir); st->model_dir = nullptr; }
-
-    if (st->dict_path) { bfree(st->dict_path); st->dict_path = nullptr; }
-
-    const char *md = obs_data_get_string(s, S_MODEL_DIR);
-
-    const char *dp = obs_data_get_string(s, S_DICT_PATH);
-
-    if (md && *md) st->model_dir = bstrdup(md);
-
-    if (dp && *dp) st->dict_path = bstrdup(dp);
+    st->show_occ_border = obs_data_get_bool(s, S_OCC_BORDER);
 
     st->debug_log = obs_data_get_bool(s, S_DEBUG_LOG);
 
-    st->use_cpu = obs_data_get_bool(s, S_USE_CPU);
+    int mode_val = (int)obs_data_get_int(s, S_OCC_MODE);
+    if (mode_val < (int)pd_occluder_mode::Image || mode_val > (int)pd_occluder_mode::GaussianBlur)
+        mode_val = (int)pd_occluder_mode::Mosaic;
+    pd_occluder_mode occ_mode = static_cast<pd_occluder_mode>(mode_val);
 
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        double x = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_x[i]));
+        double y = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_y[i]));
+        double w = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_w[i]));
+        double h = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_h[i]));
+        double max_w = std::max(0.0, 100.0 - x);
+        double max_h = std::max(0.0, 100.0 - y);
+        st->roi_x_pct[i] = x;
+        st->roi_y_pct[i] = y;
+        st->roi_w_pct[i] = std::clamp(w, 0.0, max_w);
+        st->roi_h_pct[i] = std::clamp(h, 0.0, max_h);
+
+        pd_occ_region &region = st->occ_regions[i];
+        double occ_x = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_x[i]));
+        double occ_y = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_y[i]));
+        double occ_w = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_w[i]));
+        double occ_h = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_h[i]));
+        double occ_max_w = std::max(0.0, 100.0 - occ_x);
+        double occ_max_h = std::max(0.0, 100.0 - occ_y);
+        region.x_pct = occ_x;
+        region.y_pct = occ_y;
+        region.w_pct = std::clamp(occ_w, 0.0, occ_max_w);
+        region.h_pct = std::clamp(occ_h, 0.0, occ_max_h);
+
+        region.mode = occ_mode;
+        int mosaic_px = (int)obs_data_get_int(s, k_occ_mosaic_props[i]);
+        region.mosaic_block_px = mosaic_px <= 0 ? 1 : mosaic_px;
+        region.gaussian_strength = (int)std::max<int64_t>(1, obs_data_get_int(s, k_occ_gauss_props[i]));
+
+        std::string builtin_path = pd_extract_builtin_image(i);
+        if (!builtin_path.empty())
+            pd_occ_region_set_image_path(region, builtin_path.c_str());
+        else
+            pd_occ_region_set_image_path(region, nullptr);
+
+        if (region.mode == pd_occluder_mode::Image)
+            pd_occ_region_load_image(region, i, st->debug_log);
+        else
+            pd_occ_region_release_image(region);
+    }
+
+    st->enable_ocr = obs_data_get_bool(s, S_ENABLE_OCR);
+    st->ocr_interval_ms = (int)obs_data_get_int(s, S_OCR_INTERVAL_MS);
+    if (st->ocr_interval_ms < 0)
+        st->ocr_interval_ms = 0;
+    st->next_ocr_allowed_time_ns = 0;
+
+    st->cpu_threads = (int)obs_data_get_int(s, S_CPU_THREADS);
+    if (st->cpu_threads < 1)
+        st->cpu_threads = 1;
+    st->gpu_id = (int)obs_data_get_int(s, S_GPU_ID);
+    st->gpu_mem_mb = (int)obs_data_get_int(s, S_GPU_MEM);
+    st->conf_threshold = obs_data_get_double(s, S_CONF_THR);
+
+    if (st->model_dir) { bfree(st->model_dir); st->model_dir = nullptr; }
+    if (st->dict_path) { bfree(st->dict_path); st->dict_path = nullptr; }
+
+    const char *md = obs_data_get_string(s, S_MODEL_DIR);
+    const char *dp = obs_data_get_string(s, S_DICT_PATH);
+
+    if (md && *md) st->model_dir = bstrdup(md);
+    if (dp && *dp) st->dict_path = bstrdup(dp);
+
+    st->use_cpu = obs_data_get_bool(s, S_USE_CPU);
     if (st->use_cpu)
         st->cpu_threads = 1;
 
@@ -1636,6 +1954,8 @@ static void pd_defaults(obs_data_t *s)
     obs_data_set_default_int(s, S_ROI_THICK, 2);
 
     obs_data_set_default_int(s, S_ROI_COLOR, 0x00FF00);
+    obs_data_set_default_bool(s, S_OCC_BORDER, false);
+    obs_data_set_default_int(s, S_OCC_MODE, (int)pd_occluder_mode::Mosaic);
 
     obs_data_set_default_bool(s, S_ENABLE_OCR, false);
 
@@ -1652,6 +1972,20 @@ static void pd_defaults(obs_data_t *s)
     obs_data_set_default_double(s, S_CONF_THR, 0.7);
 
     obs_data_set_default_bool(s, S_DEBUG_LOG, false);
+
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        obs_data_set_default_double(s, k_roi_prop_x[i], k_roi_x_defaults[i]);
+        obs_data_set_default_double(s, k_roi_prop_y[i], k_roi_y_defaults[i]);
+        obs_data_set_default_double(s, k_roi_prop_w[i], k_roi_w_defaults[i]);
+        obs_data_set_default_double(s, k_roi_prop_h[i], k_roi_h_defaults[i]);
+
+        obs_data_set_default_int(s, k_occ_mosaic_props[i], k_default_mosaic_block_px);
+        obs_data_set_default_double(s, k_occ_prop_x[i], k_occ_x_defaults[i]);
+        obs_data_set_default_double(s, k_occ_prop_y[i], k_occ_y_defaults[i]);
+        obs_data_set_default_double(s, k_occ_prop_w[i], k_occ_w_defaults[i]);
+        obs_data_set_default_double(s, k_occ_prop_h[i], k_occ_h_defaults[i]);
+        obs_data_set_default_int(s, k_occ_gauss_props[i], k_default_gaussian_strength);
+    }
 
 }
 
@@ -1693,6 +2027,44 @@ static obs_properties_t *pd_properties(void *data)
 
     obs_properties_add_bool(props, S_DEBUG_LOG, "Verbose OCR Debug Log");
 
+    // ROI configuration
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        const int idx = (int)i + 1;
+        std::string label = "ROI" + std::to_string(idx) + " X (%)";
+        obs_properties_add_float(props, k_roi_prop_x[i], label.c_str(), 0.0, 100.0, 0.1);
+        label = "ROI" + std::to_string(idx) + " Y (%)";
+        obs_properties_add_float(props, k_roi_prop_y[i], label.c_str(), 0.0, 100.0, 0.1);
+        label = "ROI" + std::to_string(idx) + " Width (%)";
+        obs_properties_add_float(props, k_roi_prop_w[i], label.c_str(), 0.0, 100.0, 0.1);
+        label = "ROI" + std::to_string(idx) + " Height (%)";
+        obs_properties_add_float(props, k_roi_prop_h[i], label.c_str(), 0.0, 100.0, 0.1);
+    }
+
+    // Occluder mode (global)
+    obs_property_t *occ_mode = obs_properties_add_list(props, S_OCC_MODE, "Occluder Mode",
+                                                       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(occ_mode, "Image", (int)pd_occluder_mode::Image);
+    obs_property_list_add_int(occ_mode, "Mosaic", (int)pd_occluder_mode::Mosaic);
+    obs_property_list_add_int(occ_mode, "Gaussian Blur", (int)pd_occluder_mode::GaussianBlur);
+
+    // Occlusion configuration (per ROI)
+    for (size_t i = 0; i < k_roi_count; ++i) {
+        const int idx = (int)i + 1;
+        std::string title = "Occluder " + std::to_string(idx) + " Mosaic Block (px)";
+        obs_properties_add_int(props, k_occ_mosaic_props[i], title.c_str(), 1, 512, 1);
+        title = "Occluder " + std::to_string(idx) + " Gaussian Strength";
+        obs_properties_add_int(props, k_occ_gauss_props[i], title.c_str(), 1, 64, 1);
+
+        title = "Occluder " + std::to_string(idx) + " X (%)";
+        obs_properties_add_float(props, k_occ_prop_x[i], title.c_str(), 0.0, 100.0, 0.1);
+        title = "Occluder " + std::to_string(idx) + " Y (%)";
+        obs_properties_add_float(props, k_occ_prop_y[i], title.c_str(), 0.0, 100.0, 0.1);
+        title = "Occluder " + std::to_string(idx) + " Width (%)";
+        obs_properties_add_float(props, k_occ_prop_w[i], title.c_str(), 0.0, 100.0, 0.1);
+        title = "Occluder " + std::to_string(idx) + " Height (%)";
+        obs_properties_add_float(props, k_occ_prop_h[i], title.c_str(), 0.0, 100.0, 0.1);
+    }
+
     // ROI overlay options
 
     obs_properties_add_bool(props, S_SHOW_ROI, "Show ROI Boxes");
@@ -1700,6 +2072,7 @@ static obs_properties_t *pd_properties(void *data)
     obs_properties_add_int(props, S_ROI_THICK, "ROI Border Thickness (px)", 1, 20, 1);
 
     obs_properties_add_color(props, S_ROI_COLOR, "ROI Color");
+    obs_properties_add_bool(props, S_OCC_BORDER, "Show Occluder Borders");
 
     obs_properties_add_button(props, "pd_test_trigger", "Trigger Backfill Now", pd_test_trigger_clicked);
 
@@ -1740,6 +2113,7 @@ static void pd_destroy(void *data)
     pd_release_state(f);
 
     roi_release(f);
+    occ_release(f);
 
     pd_worker_release(f);
 
@@ -1888,6 +2262,7 @@ static void pd_render(void *data, gs_effect_t *effect)
     pd_draw_front(f, st);
 
     pd_draw_roi_boxes(f, st);
+    pd_draw_occ_boxes(f, st);
 
     f->processed_frame = true;
 
@@ -1960,4 +2335,6 @@ extern "C" const struct obs_source_info *get_predictive_delay_filter_info(void)
     return &info;
 
 }
+
+
 

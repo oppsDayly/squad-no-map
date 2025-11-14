@@ -59,7 +59,7 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "warnings": {"dev": true, "deprecated": true},
-      "toolchainFile": "D:/vcpkg/vcpkg/scripts/buildsystems/vcpkg.cmake"
+      "toolchainFile": "D:\\vcpkg\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake"
     },
     {
       "name": "windows-ci-x64",

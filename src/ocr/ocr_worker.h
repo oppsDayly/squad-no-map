@@ -46,7 +46,7 @@ public:
 
 private:
   void run();
-  bool infer_and_match(const std::array<OcrRoiImage,3> &rois);
+  uint32_t infer_and_match(const std::array<OcrRoiImage,3> &rois);
   bool ensure_init();
   bool load_dict(const std::string &path);
   static void resize_rgba_to_chw32(const OcrRoiImage &in, int out_h, int &out_w, std::vector<float> &out);
