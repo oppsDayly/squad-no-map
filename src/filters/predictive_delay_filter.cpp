@@ -32,6 +32,8 @@
 
 #include <cmath>
 
+#include <cctype>
+
 #include <filesystem>
 
 #include <fstream>
@@ -73,6 +75,8 @@ enum class pd_occluder_mode {
 #define S_ROI_COLOR "pd_roi_color"
 #define S_OCC_MODE  "pd_occ_mode"
 #define S_OCC_BORDER "pd_show_occ_border"
+#define S_OCC_MOSAIC "pd_occ_mosaic_px"
+#define S_OCC_GAUSS  "pd_occ_gauss_strength"
 
 // Convert UTF-8 strings from OBS (which always uses UTF-8) into native filesystem paths.
 static std::filesystem::path pd_utf8_to_path(const std::string &utf8)
@@ -107,6 +111,9 @@ static constexpr double k_occ_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
 static constexpr double k_occ_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
 static constexpr int k_default_mosaic_block_px = 24;
 static constexpr int k_default_gaussian_strength = 6;
+static constexpr uint32_t k_watermark_color = 0xFFFFFF;
+static constexpr float k_watermark_alpha = 0.55f;
+static constexpr const char *k_watermark_text = "GAUSS BLUR";
 static constexpr uint32_t k_roi1_bit = 1u << 0;
 static constexpr uint32_t k_roi2_bit = 1u << 1;
 static constexpr uint32_t k_roi3_bit = 1u << 2;
@@ -118,12 +125,10 @@ static const char *const k_roi_prop_y[k_roi_count] = {"pd_roi1_y_pct", "pd_roi2_
 static const char *const k_roi_prop_w[k_roi_count] = {"pd_roi1_w_pct", "pd_roi2_w_pct", "pd_roi3_w_pct"};
 static const char *const k_roi_prop_h[k_roi_count] = {"pd_roi1_h_pct", "pd_roi2_h_pct", "pd_roi3_h_pct"};
 
-static const char *const k_occ_mosaic_props[k_roi_count] = {"pd_occ1_mosaic_px", "pd_occ2_mosaic_px", "pd_occ3_mosaic_px"};
 static const char *const k_occ_prop_x[k_roi_count] = {"pd_occ1_x_pct", "pd_occ2_x_pct", "pd_occ3_x_pct"};
 static const char *const k_occ_prop_y[k_roi_count] = {"pd_occ1_y_pct", "pd_occ2_y_pct", "pd_occ3_y_pct"};
 static const char *const k_occ_prop_w[k_roi_count] = {"pd_occ1_w_pct", "pd_occ2_w_pct", "pd_occ3_w_pct"};
 static const char *const k_occ_prop_h[k_roi_count] = {"pd_occ1_h_pct", "pd_occ2_h_pct", "pd_occ3_h_pct"};
-static const char *const k_occ_gauss_props[k_roi_count] = {"pd_occ1_gauss_strength", "pd_occ2_gauss_strength", "pd_occ3_gauss_strength"};
 
 #define S_ENABLE_OCR "pd_enable_ocr"
 
@@ -306,6 +311,8 @@ struct occ_res;
 static inline occ_res *occ_get(void *key);
 static inline void occ_release(void *key);
 static inline void occ_ensure(occ_res *res, size_t idx, uint32_t w, uint32_t h);
+
+static void pd_draw_watermark_text(const pd_occ_rect &rect);
 
 struct pd_occ_rect {
     int x = 0;
@@ -803,6 +810,8 @@ static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, u
             uint32_t down_w = std::max<uint32_t>(1u, (uint32_t)rect.w / (uint32_t)strength);
             uint32_t down_h = std::max<uint32_t>(1u, (uint32_t)rect.h / (uint32_t)strength);
             drew = pd_draw_downsampled_region(f, frame_tex, frame_space, rect, gfx, roi, down_w, down_h, false);
+            if (drew)
+                pd_draw_watermark_text(rect);
             if (st->debug_log) {
                 obs_log(LOG_INFO, "[pd][occ] roi%zu gaussian blur drawn at (%d,%d,%d,%d) strength=%d",
                         roi + 1, rect.x, rect.y, rect.w, rect.h, strength);
@@ -1838,6 +1847,13 @@ static void pd_update(void *data, obs_data_t *s)
         mode_val = (int)pd_occluder_mode::Mosaic;
     pd_occluder_mode occ_mode = static_cast<pd_occluder_mode>(mode_val);
 
+    int mosaic_global = (int)obs_data_get_int(s, S_OCC_MOSAIC);
+    if (mosaic_global < 1)
+        mosaic_global = 1;
+    int gauss_global = (int)obs_data_get_int(s, S_OCC_GAUSS);
+    if (gauss_global < 1)
+        gauss_global = 1;
+
     for (size_t i = 0; i < k_roi_count; ++i) {
         double x = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_x[i]));
         double y = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_y[i]));
@@ -1863,9 +1879,8 @@ static void pd_update(void *data, obs_data_t *s)
         region.h_pct = std::clamp(occ_h, 0.0, occ_max_h);
 
         region.mode = occ_mode;
-        int mosaic_px = (int)obs_data_get_int(s, k_occ_mosaic_props[i]);
-        region.mosaic_block_px = mosaic_px <= 0 ? 1 : mosaic_px;
-        region.gaussian_strength = (int)std::max<int64_t>(1, obs_data_get_int(s, k_occ_gauss_props[i]));
+        region.mosaic_block_px = mosaic_global;
+        region.gaussian_strength = gauss_global;
 
         std::string builtin_path = pd_extract_builtin_image(i);
         if (!builtin_path.empty())
@@ -1956,6 +1971,8 @@ static void pd_defaults(obs_data_t *s)
     obs_data_set_default_int(s, S_ROI_COLOR, 0x00FF00);
     obs_data_set_default_bool(s, S_OCC_BORDER, false);
     obs_data_set_default_int(s, S_OCC_MODE, (int)pd_occluder_mode::Mosaic);
+    obs_data_set_default_int(s, S_OCC_MOSAIC, k_default_mosaic_block_px);
+    obs_data_set_default_int(s, S_OCC_GAUSS, k_default_gaussian_strength);
 
     obs_data_set_default_bool(s, S_ENABLE_OCR, false);
 
@@ -1979,12 +1996,10 @@ static void pd_defaults(obs_data_t *s)
         obs_data_set_default_double(s, k_roi_prop_w[i], k_roi_w_defaults[i]);
         obs_data_set_default_double(s, k_roi_prop_h[i], k_roi_h_defaults[i]);
 
-        obs_data_set_default_int(s, k_occ_mosaic_props[i], k_default_mosaic_block_px);
         obs_data_set_default_double(s, k_occ_prop_x[i], k_occ_x_defaults[i]);
         obs_data_set_default_double(s, k_occ_prop_y[i], k_occ_y_defaults[i]);
         obs_data_set_default_double(s, k_occ_prop_w[i], k_occ_w_defaults[i]);
         obs_data_set_default_double(s, k_occ_prop_h[i], k_occ_h_defaults[i]);
-        obs_data_set_default_int(s, k_occ_gauss_props[i], k_default_gaussian_strength);
     }
 
 }
@@ -2047,15 +2062,13 @@ static obs_properties_t *pd_properties(void *data)
     obs_property_list_add_int(occ_mode, "Mosaic", (int)pd_occluder_mode::Mosaic);
     obs_property_list_add_int(occ_mode, "Gaussian Blur", (int)pd_occluder_mode::GaussianBlur);
 
+    obs_properties_add_int(props, S_OCC_MOSAIC, "Occluder Mosaic Block (px)", 1, 512, 1);
+    obs_properties_add_int(props, S_OCC_GAUSS, "Occluder Gaussian Strength", 1, 64, 1);
+
     // Occlusion configuration (per ROI)
     for (size_t i = 0; i < k_roi_count; ++i) {
         const int idx = (int)i + 1;
-        std::string title = "Occluder " + std::to_string(idx) + " Mosaic Block (px)";
-        obs_properties_add_int(props, k_occ_mosaic_props[i], title.c_str(), 1, 512, 1);
-        title = "Occluder " + std::to_string(idx) + " Gaussian Strength";
-        obs_properties_add_int(props, k_occ_gauss_props[i], title.c_str(), 1, 64, 1);
-
-        title = "Occluder " + std::to_string(idx) + " X (%)";
+        std::string title = "Occluder " + std::to_string(idx) + " X (%)";
         obs_properties_add_float(props, k_occ_prop_x[i], title.c_str(), 0.0, 100.0, 0.1);
         title = "Occluder " + std::to_string(idx) + " Y (%)";
         obs_properties_add_float(props, k_occ_prop_y[i], title.c_str(), 0.0, 100.0, 0.1);
@@ -2338,3 +2351,50 @@ extern "C" const struct obs_source_info *get_predictive_delay_filter_info(void)
 
 
 
+struct pd_glyph {
+    uint8_t rows[7];
+    int width;
+};
+
+static pd_glyph pd_lookup_glyph(char c)
+{
+    switch (c) {
+    case 'A': return {{0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, 5};
+    case 'B': return {{0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, 5};
+    case 'G': return {{0x0E,0x11,0x10,0x17,0x11,0x11,0x0E}, 5};
+    case 'L': return {{0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, 5};
+    case 'R': return {{0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, 5};
+    case 'S': return {{0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, 5};
+    case 'U': return {{0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, 5};
+    case ' ': return {{0x00,0x00,0x00,0x00,0x00,0x00,0x00}, 3};
+    default:  return {{0x00,0x00,0x00,0x00,0x00,0x00,0x00}, 3};
+    }
+}
+
+static void pd_draw_watermark_text(const pd_occ_rect &rect)
+{
+    if (rect.w <= 0 || rect.h <= 0)
+        return;
+    float unit = std::max(1.0f, std::min((float)rect.w, (float)rect.h) / 140.0f);
+    float glyph_height = 7.0f * unit;
+    const float margin = 6.0f;
+    const float base_x = (float)rect.x + margin;
+    float base_y = (float)rect.y + (float)rect.h - glyph_height - margin;
+    if (base_y < (float)rect.y)
+        base_y = (float)rect.y;
+    float cursor = base_x;
+    for (const char *p = k_watermark_text; p && *p; ++p) {
+        pd_glyph glyph = pd_lookup_glyph((char)toupper((unsigned char)*p));
+        for (int row = 0; row < 7; ++row) {
+            uint8_t bits = glyph.rows[row];
+            for (int col = 0; col < glyph.width; ++col) {
+                if (bits & (1u << (glyph.width - col - 1))) {
+                    float x = cursor + col * unit;
+                    float y = base_y + row * unit;
+                    pd_draw_rect(x, y, unit, unit, k_watermark_color, k_watermark_alpha);
+                }
+            }
+        }
+        cursor += (float)glyph.width * unit + unit;
+    }
+}
