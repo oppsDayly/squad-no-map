@@ -105,10 +105,10 @@ static constexpr double k_roi_x_defaults[k_roi_count] = {29.6, 25.8, 64.6};
 static constexpr double k_roi_y_defaults[k_roi_count] = {2.4, 12.0, 10.8};
 static constexpr double k_roi_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
 static constexpr double k_roi_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
-static constexpr double k_occ_x_defaults[k_roi_count] = {29.6, 25.8, 64.6};
-static constexpr double k_occ_y_defaults[k_roi_count] = {2.4, 12.0, 10.8};
-static constexpr double k_occ_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
-static constexpr double k_occ_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
+static constexpr double k_occ_x_defaults[k_roi_count] = {29.10, 47.60, 53.00};
+static constexpr double k_occ_y_defaults[k_roi_count] = {7.30, 15.90, 9.30};
+static constexpr double k_occ_w_defaults[k_roi_count] = {70.00, 51.40, 47.00};
+static constexpr double k_occ_h_defaults[k_roi_count] = {90.80, 76.80, 81.50};
 static constexpr int k_default_mosaic_block_px = 24;
 static constexpr int k_default_gaussian_strength = 6;
 static constexpr uint32_t k_watermark_color = 0xFFFFFF;
@@ -120,15 +120,6 @@ static constexpr uint32_t k_roi3_bit = 1u << 2;
 static constexpr uint32_t k_roi12_mask = k_roi1_bit | k_roi2_bit;
 static constexpr uint32_t k_roi3_mask = k_roi3_bit;
 
-static const char *const k_roi_prop_x[k_roi_count] = {"pd_roi1_x_pct", "pd_roi2_x_pct", "pd_roi3_x_pct"};
-static const char *const k_roi_prop_y[k_roi_count] = {"pd_roi1_y_pct", "pd_roi2_y_pct", "pd_roi3_y_pct"};
-static const char *const k_roi_prop_w[k_roi_count] = {"pd_roi1_w_pct", "pd_roi2_w_pct", "pd_roi3_w_pct"};
-static const char *const k_roi_prop_h[k_roi_count] = {"pd_roi1_h_pct", "pd_roi2_h_pct", "pd_roi3_h_pct"};
-
-static const char *const k_occ_prop_x[k_roi_count] = {"pd_occ1_x_pct", "pd_occ2_x_pct", "pd_occ3_x_pct"};
-static const char *const k_occ_prop_y[k_roi_count] = {"pd_occ1_y_pct", "pd_occ2_y_pct", "pd_occ3_y_pct"};
-static const char *const k_occ_prop_w[k_roi_count] = {"pd_occ1_w_pct", "pd_occ2_w_pct", "pd_occ3_w_pct"};
-static const char *const k_occ_prop_h[k_roi_count] = {"pd_occ1_h_pct", "pd_occ2_h_pct", "pd_occ3_h_pct"};
 
 #define S_ENABLE_OCR "pd_enable_ocr"
 
@@ -1855,28 +1846,16 @@ static void pd_update(void *data, obs_data_t *s)
         gauss_global = 1;
 
     for (size_t i = 0; i < k_roi_count; ++i) {
-        double x = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_x[i]));
-        double y = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_y[i]));
-        double w = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_w[i]));
-        double h = pd_sanitize_pct(obs_data_get_double(s, k_roi_prop_h[i]));
-        double max_w = std::max(0.0, 100.0 - x);
-        double max_h = std::max(0.0, 100.0 - y);
-        st->roi_x_pct[i] = x;
-        st->roi_y_pct[i] = y;
-        st->roi_w_pct[i] = std::clamp(w, 0.0, max_w);
-        st->roi_h_pct[i] = std::clamp(h, 0.0, max_h);
+        st->roi_x_pct[i] = k_roi_x_defaults[i];
+        st->roi_y_pct[i] = k_roi_y_defaults[i];
+        st->roi_w_pct[i] = k_roi_w_defaults[i];
+        st->roi_h_pct[i] = k_roi_h_defaults[i];
 
         pd_occ_region &region = st->occ_regions[i];
-        double occ_x = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_x[i]));
-        double occ_y = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_y[i]));
-        double occ_w = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_w[i]));
-        double occ_h = pd_sanitize_pct(obs_data_get_double(s, k_occ_prop_h[i]));
-        double occ_max_w = std::max(0.0, 100.0 - occ_x);
-        double occ_max_h = std::max(0.0, 100.0 - occ_y);
-        region.x_pct = occ_x;
-        region.y_pct = occ_y;
-        region.w_pct = std::clamp(occ_w, 0.0, occ_max_w);
-        region.h_pct = std::clamp(occ_h, 0.0, occ_max_h);
+        region.x_pct = k_occ_x_defaults[i];
+        region.y_pct = k_occ_y_defaults[i];
+        region.w_pct = k_occ_w_defaults[i];
+        region.h_pct = k_occ_h_defaults[i];
 
         region.mode = occ_mode;
         region.mosaic_block_px = mosaic_global;
@@ -1990,18 +1969,6 @@ static void pd_defaults(obs_data_t *s)
 
     obs_data_set_default_bool(s, S_DEBUG_LOG, false);
 
-    for (size_t i = 0; i < k_roi_count; ++i) {
-        obs_data_set_default_double(s, k_roi_prop_x[i], k_roi_x_defaults[i]);
-        obs_data_set_default_double(s, k_roi_prop_y[i], k_roi_y_defaults[i]);
-        obs_data_set_default_double(s, k_roi_prop_w[i], k_roi_w_defaults[i]);
-        obs_data_set_default_double(s, k_roi_prop_h[i], k_roi_h_defaults[i]);
-
-        obs_data_set_default_double(s, k_occ_prop_x[i], k_occ_x_defaults[i]);
-        obs_data_set_default_double(s, k_occ_prop_y[i], k_occ_y_defaults[i]);
-        obs_data_set_default_double(s, k_occ_prop_w[i], k_occ_w_defaults[i]);
-        obs_data_set_default_double(s, k_occ_prop_h[i], k_occ_h_defaults[i]);
-    }
-
 }
 
 static obs_properties_t *pd_properties(void *data)
@@ -2042,19 +2009,6 @@ static obs_properties_t *pd_properties(void *data)
 
     obs_properties_add_bool(props, S_DEBUG_LOG, "Verbose OCR Debug Log");
 
-    // ROI configuration
-    for (size_t i = 0; i < k_roi_count; ++i) {
-        const int idx = (int)i + 1;
-        std::string label = "ROI" + std::to_string(idx) + " X (%)";
-        obs_properties_add_float(props, k_roi_prop_x[i], label.c_str(), 0.0, 100.0, 0.1);
-        label = "ROI" + std::to_string(idx) + " Y (%)";
-        obs_properties_add_float(props, k_roi_prop_y[i], label.c_str(), 0.0, 100.0, 0.1);
-        label = "ROI" + std::to_string(idx) + " Width (%)";
-        obs_properties_add_float(props, k_roi_prop_w[i], label.c_str(), 0.0, 100.0, 0.1);
-        label = "ROI" + std::to_string(idx) + " Height (%)";
-        obs_properties_add_float(props, k_roi_prop_h[i], label.c_str(), 0.0, 100.0, 0.1);
-    }
-
     // Occluder mode (global)
     obs_property_t *occ_mode = obs_properties_add_list(props, S_OCC_MODE, "Occluder Mode",
                                                        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -2064,19 +2018,6 @@ static obs_properties_t *pd_properties(void *data)
 
     obs_properties_add_int(props, S_OCC_MOSAIC, "Occluder Mosaic Block (px)", 1, 512, 1);
     obs_properties_add_int(props, S_OCC_GAUSS, "Occluder Gaussian Strength", 1, 64, 1);
-
-    // Occlusion configuration (per ROI)
-    for (size_t i = 0; i < k_roi_count; ++i) {
-        const int idx = (int)i + 1;
-        std::string title = "Occluder " + std::to_string(idx) + " X (%)";
-        obs_properties_add_float(props, k_occ_prop_x[i], title.c_str(), 0.0, 100.0, 0.1);
-        title = "Occluder " + std::to_string(idx) + " Y (%)";
-        obs_properties_add_float(props, k_occ_prop_y[i], title.c_str(), 0.0, 100.0, 0.1);
-        title = "Occluder " + std::to_string(idx) + " Width (%)";
-        obs_properties_add_float(props, k_occ_prop_w[i], title.c_str(), 0.0, 100.0, 0.1);
-        title = "Occluder " + std::to_string(idx) + " Height (%)";
-        obs_properties_add_float(props, k_occ_prop_h[i], title.c_str(), 0.0, 100.0, 0.1);
-    }
 
     // ROI overlay options
 
