@@ -61,11 +61,24 @@ enum class pd_occluder_mode {
     GaussianBlur = 2,
 };
 
+enum class pd_roi_profile {
+    Ratio16x9 = 0,
+    Ultrawide21x9 = 1,
+};
+
+enum class pd_ocr_backend {
+    WindowsRuntime = 0,
+    PaddleCpu = 1,
+    PaddleGpu = 2,
+};
+
 #define S_DELAY_MS "pd_delay_ms"
 
 #define S_BACK_FRAMES "pd_back_frames"
 
 #define S_HOLD_FRAMES "pd_hold_frames"
+
+#define S_ROI_PROFILE "pd_roi_profile"
 
 
 #define S_SHOW_ROI  "pd_show_roi"
@@ -77,6 +90,9 @@ enum class pd_occluder_mode {
 #define S_OCC_BORDER "pd_show_occ_border"
 #define S_OCC_MOSAIC "pd_occ_mosaic_px"
 #define S_OCC_GAUSS  "pd_occ_gauss_strength"
+#define S_OCC_IMAGE_1 "pd_occ_image_1"
+#define S_OCC_IMAGE_2 "pd_occ_image_2"
+#define S_OCC_IMAGE_3 "pd_occ_image_3"
 
 // Convert UTF-8 strings from OBS (which always uses UTF-8) into native filesystem paths.
 static std::filesystem::path pd_utf8_to_path(const std::string &utf8)
@@ -101,29 +117,46 @@ static std::filesystem::path pd_utf8_to_path(const std::string &utf8)
 
 // Built-in ROI rectangles defined in percent of frame dimensions
 static constexpr size_t k_roi_count = 3;
+// 16:9 defaults (legacy profile)
 static constexpr double k_roi_x_defaults[k_roi_count] = {29.6, 25.8, 64.6};
 static constexpr double k_roi_y_defaults[k_roi_count] = {2.4, 12.0, 10.8};
 static constexpr double k_roi_w_defaults[k_roi_count] = {4.1, 4.4, 4.1};
 static constexpr double k_roi_h_defaults[k_roi_count] = {3.5, 3.5, 3.5};
-static constexpr double k_occ_x_defaults[k_roi_count] = {29.10, 47.60, 53.00};
-static constexpr double k_occ_y_defaults[k_roi_count] = {7.30, 15.90, 9.30};
-static constexpr double k_occ_w_defaults[k_roi_count] = {70.00, 51.40, 47.00};
-static constexpr double k_occ_h_defaults[k_roi_count] = {90.80, 76.80, 81.50};
+// Ultrawide 21:9 defaults, classified against existing ROI order:
+// ROI1(top), ROI2(left-mid), ROI3(right)
+static constexpr double k_roi_x_ultrawide_defaults[k_roi_count] = {21.7, 18.5, 67.4};
+static constexpr double k_roi_y_ultrawide_defaults[k_roi_count] = {2.2, 12.0, 11.3};
+static constexpr double k_roi_w_ultrawide_defaults[k_roi_count] = {4.1, 4.4, 3.3};
+static constexpr double k_roi_h_ultrawide_defaults[k_roi_count] = {3.2, 3.5, 3.5};
+static constexpr double k_occ_x_defaults[k_roi_count] = {29.0, 47.0, 52.9};
+static constexpr double k_occ_y_defaults[k_roi_count] = {1.2, 12.7, 8.7};
+static constexpr double k_occ_w_defaults[k_roi_count] = {70.0, 52.0, 47.0};
+static constexpr double k_occ_h_defaults[k_roi_count] = {97.0, 80.0, 82.0};
 static constexpr int k_default_mosaic_block_px = 24;
 static constexpr int k_default_gaussian_strength = 6;
 static constexpr uint32_t k_watermark_color = 0xFFFFFF;
 static constexpr float k_watermark_alpha = 0.55f;
-static constexpr const char *k_watermark_text = "GAUSS BLUR";
+static constexpr const char *k_watermark_text = "Squad No Map";
+static constexpr const char *k_overlay_text = "Squad No Map";
 static constexpr uint32_t k_roi1_bit = 1u << 0;
 static constexpr uint32_t k_roi2_bit = 1u << 1;
 static constexpr uint32_t k_roi3_bit = 1u << 2;
 static constexpr uint32_t k_roi12_mask = k_roi1_bit | k_roi2_bit;
 static constexpr uint32_t k_roi3_mask = k_roi3_bit;
+static constexpr const char *k_occ_image_keys[k_roi_count] = {
+    S_OCC_IMAGE_1,
+    S_OCC_IMAGE_2,
+    S_OCC_IMAGE_3,
+};
 
 
 #define S_ENABLE_OCR "pd_enable_ocr"
 
 #define S_OCR_INTERVAL_MS "pd_ocr_interval_ms"
+
+#define S_OCR_BACKEND "pd_ocr_backend"
+
+#define S_OCR_LANG   "pd_ocr_language"
 
 #define S_GPU_ID     "pd_gpu_id"
 
@@ -138,8 +171,6 @@ static constexpr uint32_t k_roi3_mask = k_roi3_bit;
 #define S_DICT_PATH  "pd_dict_path"
 
 #define S_DEBUG_LOG  "pd_debug_log"
-
-#define S_USE_CPU    "pd_use_cpu"
 
 #define T_FILTER_NAME obs_module_text("PredictiveDelayFilter")
 
@@ -228,6 +259,8 @@ struct pd_b_state {
 
     double roi_h_pct[k_roi_count] = {};
 
+    int roi_profile = (int)pd_roi_profile::Ratio16x9;
+
     bool show_roi = true;
     bool show_occ_border = false;
 
@@ -237,21 +270,23 @@ struct pd_b_state {
 
     bool enable_ocr = false;
 
+    int ocr_backend = (int)pd_ocr_backend::WindowsRuntime;
+
+    double conf_threshold = 0.7;
+
+    char *ocr_language = nullptr;
+
     int gpu_id = 0;
 
     int gpu_mem_mb = 512;
 
     int cpu_threads = 1;
 
-    double conf_threshold = 0.7;
-
     char *model_dir = nullptr;
 
     char *dict_path = nullptr;
 
     bool debug_log = false;
-
-    bool use_cpu = false;
 
     int ocr_interval_ms = 100;
 
@@ -264,11 +299,17 @@ static inline void pd_apply_roi_defaults(pd_b_state *st)
 
     if (!st) return;
 
+    const bool ultrawide = st->roi_profile == (int)pd_roi_profile::Ultrawide21x9;
+    const double *x_defaults = ultrawide ? k_roi_x_ultrawide_defaults : k_roi_x_defaults;
+    const double *y_defaults = ultrawide ? k_roi_y_ultrawide_defaults : k_roi_y_defaults;
+    const double *w_defaults = ultrawide ? k_roi_w_ultrawide_defaults : k_roi_w_defaults;
+    const double *h_defaults = ultrawide ? k_roi_h_ultrawide_defaults : k_roi_h_defaults;
+
     for (size_t i = 0; i < k_roi_count; ++i) {
-        st->roi_x_pct[i] = k_roi_x_defaults[i];
-        st->roi_y_pct[i] = k_roi_y_defaults[i];
-        st->roi_w_pct[i] = k_roi_w_defaults[i];
-        st->roi_h_pct[i] = k_roi_h_defaults[i];
+        st->roi_x_pct[i] = x_defaults[i];
+        st->roi_y_pct[i] = y_defaults[i];
+        st->roi_w_pct[i] = w_defaults[i];
+        st->roi_h_pct[i] = h_defaults[i];
     }
 }
 
@@ -290,6 +331,9 @@ static inline void pd_draw_rect(float x, float y, float w, float h, uint32_t rgb
 
 static void pd_draw_front(struct pd_filter_data *f, pd_b_state *st);
 struct pd_occ_rect;
+static float pd_text_width(const char *text, float unit);
+static void pd_draw_text_line(const char *text, float x, float y, float unit, uint32_t color, float alpha);
+static void pd_draw_center_text(const pd_occ_rect &rect, const char *text, uint32_t color, float alpha);
 
 static void pd_draw_roi_boxes(struct pd_filter_data *f, pd_b_state *st);
 
@@ -413,11 +457,30 @@ static std::string pd_extract_builtin_image(size_t idx)
         return {};
     size_t actual = (idx < k_builtin_occluder_count) ? idx : (k_builtin_occluder_count - 1);
     const auto &def = k_builtin_occluders[actual];
-    char *utf8 = obs_module_file(def.filename);
-    if (!utf8) {
+
+    // Prefer module config path for a writable, per-plugin location.
+    char *utf8 = obs_module_config_path(def.filename);
+
+#if defined(_WIN32)
+    // Fallback: %TEMP%/squad-no-map/embedded_xxx if OBS does not provide a config path yet.
+    char fallback[MAX_PATH] = {};
+    if (!utf8 || !*utf8) {
+        DWORD n = GetTempPathA((DWORD)sizeof(fallback), fallback);
+        if (n > 0 && n < sizeof(fallback)) {
+            std::string tmp = std::string(fallback) + "squad-no-map\\";
+            CreateDirectoryA(tmp.c_str(), nullptr);
+            tmp += def.filename;
+            utf8 = bstrdup(tmp.c_str());
+        }
+    }
+#endif
+
+    if (!utf8 || !*utf8) {
         obs_log(LOG_ERROR, "[pd][occ] failed to resolve builtin image path for idx=%zu", idx);
+        if (utf8) bfree(utf8);
         return {};
     }
+
     std::string path = utf8;
     bfree(utf8);
 
@@ -767,21 +830,33 @@ static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, u
                     gs_matrix_identity();
                     gs_matrix_translate3f(offset_x, offset_y, 0.0f);
 
+                    bool looped = false;
                     while (gs_effect_loop(e, "Draw")) {
                         gs_draw_sprite(region.image.texture, 0,
                                        (uint32_t)std::round(draw_w),
                                        (uint32_t)std::round(draw_h));
-                        drew = true;
+                        looped = true;
                     }
+                    if (!looped) {
+                        // Fallback: draw once without effect loop to avoid black overlay.
+                        gs_draw_sprite(region.image.texture, 0,
+                                       (uint32_t)std::round(draw_w),
+                                       (uint32_t)std::round(draw_h));
+                    }
+                    drew = true;
 
                     gs_matrix_pop();
 
                     if (st->debug_log) {
-                        obs_log(LOG_INFO, "[pd][occ] roi%zu image cover drawn at (%d,%d,%d,%d)",
-                                roi + 1, rect.x, rect.y, rect.w, rect.h);
+                        obs_log(LOG_INFO, "[pd][occ] roi%zu image cover drawn at (%d,%d,%d,%d)%s",
+                                roi + 1, rect.x, rect.y, rect.w, rect.h, looped ? "" : " (fallback sprite draw)");
                     }
                 }
+            } else if (st->debug_log) {
+                obs_log(LOG_WARNING, "[pd][occ] roi%zu image not loaded; falling back to solid fill", roi + 1);
             }
+            // In image mode, always stamp a bottom-left watermark.
+            pd_draw_watermark_text(rect);
             break;
         case pd_occluder_mode::Mosaic: {
             int block = region.mosaic_block_px <= 0 ? 1 : region.mosaic_block_px;
@@ -790,6 +865,9 @@ static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, u
             down_w = std::min<uint32_t>(down_w, (uint32_t)rect.w);
             down_h = std::min<uint32_t>(down_h, (uint32_t)rect.h);
             drew = pd_draw_downsampled_region(f, frame_tex, frame_space, rect, gfx, roi, down_w, down_h, true);
+            // Center text + bottom watermark
+            pd_draw_center_text(rect, k_overlay_text, k_watermark_color, 0.9f);
+            pd_draw_watermark_text(rect);
             if (st->debug_log) {
                 obs_log(LOG_INFO, "[pd][occ] roi%zu mosaic drawn at (%d,%d,%d,%d) block=%d",
                         roi + 1, rect.x, rect.y, rect.w, rect.h, block);
@@ -801,8 +879,9 @@ static void pd_draw_occluder_overlay(struct pd_filter_data *f, pd_b_state *st, u
             uint32_t down_w = std::max<uint32_t>(1u, (uint32_t)rect.w / (uint32_t)strength);
             uint32_t down_h = std::max<uint32_t>(1u, (uint32_t)rect.h / (uint32_t)strength);
             drew = pd_draw_downsampled_region(f, frame_tex, frame_space, rect, gfx, roi, down_w, down_h, false);
-            if (drew)
-                pd_draw_watermark_text(rect);
+            // Center text + bottom watermark
+            pd_draw_center_text(rect, k_overlay_text, k_watermark_color, 0.9f);
+            pd_draw_watermark_text(rect);
             if (st->debug_log) {
                 obs_log(LOG_INFO, "[pd][occ] roi%zu gaussian blur drawn at (%d,%d,%d,%d) strength=%d",
                         roi + 1, rect.x, rect.y, rect.w, rect.h, strength);
@@ -1015,8 +1094,8 @@ static inline void pd_release_state(void *key)
             }
         }
 
+        if (s->ocr_language) bfree(s->ocr_language);
         if (s->model_dir) bfree(s->model_dir);
-
         if (s->dict_path) bfree(s->dict_path);
 
         bfree(s);
@@ -1220,16 +1299,16 @@ static inline void pd_capture_and_submit(struct pd_filter_data *f, pd_b_state *s
     OcrWorkerConfig cfg;
 
     cfg.enable = st->enable_ocr;
-
-    cfg.use_cpu = st->use_cpu;
-
-    cfg.gpu_id = st->gpu_id;
-
-    cfg.gpu_mem_mb = st->gpu_mem_mb;
-
+    cfg.backend = st->ocr_backend == (int)pd_ocr_backend::WindowsRuntime
+        ? OcrBackend::WindowsRuntime
+        : OcrBackend::PaddleInference;
+    cfg.use_cpu = st->ocr_backend == (int)pd_ocr_backend::PaddleCpu;
+    if (st->ocr_language) cfg.language_tag = st->ocr_language;
     if (st->model_dir) cfg.model_dir = st->model_dir;
-
     if (st->dict_path) cfg.dict_path = st->dict_path;
+    cfg.gpu_id = st->gpu_id;
+    cfg.gpu_mem_mb = st->gpu_mem_mb;
+    cfg.cpu_threads = st->cpu_threads;
 
     cfg.conf_threshold = st->conf_threshold;
 
@@ -1238,8 +1317,6 @@ static inline void pd_capture_and_submit(struct pd_filter_data *f, pd_b_state *s
     cfg.back_frames = st->back_frames;
 
     cfg.hold_frames = st->hold_frames;
-
-    cfg.cpu_threads = st->use_cpu ? 1 : st->cpu_threads;
 
     worker->update_config(cfg);
 
@@ -1826,6 +1903,12 @@ static void pd_update(void *data, obs_data_t *s)
     st->pending_from = 0;
     st->pending_to = 0;
 
+    int roi_profile = (int)obs_data_get_int(s, S_ROI_PROFILE);
+    if (roi_profile < (int)pd_roi_profile::Ratio16x9 || roi_profile > (int)pd_roi_profile::Ultrawide21x9)
+        roi_profile = (int)pd_roi_profile::Ratio16x9;
+    st->roi_profile = roi_profile;
+    pd_apply_roi_defaults(st);
+
     st->show_roi = obs_data_get_bool(s, S_SHOW_ROI);
     st->roi_thickness = (int)obs_data_get_int(s, S_ROI_THICK);
     st->roi_color = (uint32_t)obs_data_get_int(s, S_ROI_COLOR);
@@ -1846,11 +1929,6 @@ static void pd_update(void *data, obs_data_t *s)
         gauss_global = 1;
 
     for (size_t i = 0; i < k_roi_count; ++i) {
-        st->roi_x_pct[i] = k_roi_x_defaults[i];
-        st->roi_y_pct[i] = k_roi_y_defaults[i];
-        st->roi_w_pct[i] = k_roi_w_defaults[i];
-        st->roi_h_pct[i] = k_roi_h_defaults[i];
-
         pd_occ_region &region = st->occ_regions[i];
         region.x_pct = k_occ_x_defaults[i];
         region.y_pct = k_occ_y_defaults[i];
@@ -1861,11 +1939,16 @@ static void pd_update(void *data, obs_data_t *s)
         region.mosaic_block_px = mosaic_global;
         region.gaussian_strength = gauss_global;
 
-        std::string builtin_path = pd_extract_builtin_image(i);
-        if (!builtin_path.empty())
-            pd_occ_region_set_image_path(region, builtin_path.c_str());
-        else
-            pd_occ_region_set_image_path(region, nullptr);
+        const char *user_image_path = obs_data_get_string(s, k_occ_image_keys[i]);
+        if (user_image_path && *user_image_path) {
+            pd_occ_region_set_image_path(region, user_image_path);
+        } else {
+            std::string builtin_path = pd_extract_builtin_image(i);
+            if (!builtin_path.empty())
+                pd_occ_region_set_image_path(region, builtin_path.c_str());
+            else
+                pd_occ_region_set_image_path(region, nullptr);
+        }
 
         if (region.mode == pd_occluder_mode::Image)
             pd_occ_region_load_image(region, i, st->debug_log);
@@ -1879,24 +1962,40 @@ static void pd_update(void *data, obs_data_t *s)
         st->ocr_interval_ms = 0;
     st->next_ocr_allowed_time_ns = 0;
 
+    int backend = (int)obs_data_get_int(s, S_OCR_BACKEND);
+    if (backend < (int)pd_ocr_backend::WindowsRuntime || backend > (int)pd_ocr_backend::PaddleGpu)
+        backend = (int)pd_ocr_backend::WindowsRuntime;
+    st->ocr_backend = backend;
+
+    st->conf_threshold = obs_data_get_double(s, S_CONF_THR);
+    if (st->conf_threshold < 0.0)
+        st->conf_threshold = 0.0;
+    if (st->conf_threshold > 1.0)
+        st->conf_threshold = 1.0;
+
+    if (st->ocr_language) { bfree(st->ocr_language); st->ocr_language = nullptr; }
+    if (st->model_dir) { bfree(st->model_dir); st->model_dir = nullptr; }
+    if (st->dict_path) { bfree(st->dict_path); st->dict_path = nullptr; }
+
+    const char *lang = obs_data_get_string(s, S_OCR_LANG);
+    if (lang && *lang) st->ocr_language = bstrdup(lang);
+    if (!st->ocr_language) st->ocr_language = bstrdup("zh-Hans-CN");
+
+    const char *md = obs_data_get_string(s, S_MODEL_DIR);
+    const char *dp = obs_data_get_string(s, S_DICT_PATH);
+    if (md && *md) st->model_dir = bstrdup(md);
+    if (dp && *dp) st->dict_path = bstrdup(dp);
+
     st->cpu_threads = (int)obs_data_get_int(s, S_CPU_THREADS);
     if (st->cpu_threads < 1)
         st->cpu_threads = 1;
     st->gpu_id = (int)obs_data_get_int(s, S_GPU_ID);
+    if (st->gpu_id < 0)
+        st->gpu_id = 0;
     st->gpu_mem_mb = (int)obs_data_get_int(s, S_GPU_MEM);
-    st->conf_threshold = obs_data_get_double(s, S_CONF_THR);
-
-    if (st->model_dir) { bfree(st->model_dir); st->model_dir = nullptr; }
-    if (st->dict_path) { bfree(st->dict_path); st->dict_path = nullptr; }
-
-    const char *md = obs_data_get_string(s, S_MODEL_DIR);
-    const char *dp = obs_data_get_string(s, S_DICT_PATH);
-
-    if (md && *md) st->model_dir = bstrdup(md);
-    if (dp && *dp) st->dict_path = bstrdup(dp);
-
-    st->use_cpu = obs_data_get_bool(s, S_USE_CPU);
-    if (st->use_cpu)
+    if (st->gpu_mem_mb < 1)
+        st->gpu_mem_mb = 512;
+    if (st->ocr_backend == (int)pd_ocr_backend::PaddleCpu)
         st->cpu_threads = 1;
 
     // full reset
@@ -1943,27 +2042,39 @@ static void pd_defaults(obs_data_t *s)
 
     obs_data_set_default_int(s, S_HOLD_FRAMES, 55);
 
+    obs_data_set_default_int(s, S_ROI_PROFILE, (int)pd_roi_profile::Ratio16x9);
+
     obs_data_set_default_bool(s, S_SHOW_ROI, true);
 
     obs_data_set_default_int(s, S_ROI_THICK, 2);
 
     obs_data_set_default_int(s, S_ROI_COLOR, 0x00FF00);
     obs_data_set_default_bool(s, S_OCC_BORDER, false);
-    obs_data_set_default_int(s, S_OCC_MODE, (int)pd_occluder_mode::Mosaic);
+    // 默认使用内置遮挡图（Image 模式），方便直接预览嵌入图片
+    obs_data_set_default_int(s, S_OCC_MODE, (int)pd_occluder_mode::Image);
     obs_data_set_default_int(s, S_OCC_MOSAIC, k_default_mosaic_block_px);
     obs_data_set_default_int(s, S_OCC_GAUSS, k_default_gaussian_strength);
+    obs_data_set_default_string(s, S_OCC_IMAGE_1, "");
+    obs_data_set_default_string(s, S_OCC_IMAGE_2, "");
+    obs_data_set_default_string(s, S_OCC_IMAGE_3, "");
 
     obs_data_set_default_bool(s, S_ENABLE_OCR, false);
 
     obs_data_set_default_int(s, S_OCR_INTERVAL_MS, 100);
 
-    obs_data_set_default_bool(s, S_USE_CPU, false);
+    obs_data_set_default_int(s, S_OCR_BACKEND, (int)pd_ocr_backend::WindowsRuntime);
+
+    obs_data_set_default_string(s, S_OCR_LANG, "zh-Hans-CN");
 
     obs_data_set_default_int(s, S_CPU_THREADS, 1);
 
     obs_data_set_default_int(s, S_GPU_ID, 0);
 
     obs_data_set_default_int(s, S_GPU_MEM, 512);
+
+    obs_data_set_default_string(s, S_MODEL_DIR, "");
+
+    obs_data_set_default_string(s, S_DICT_PATH, "");
 
     obs_data_set_default_double(s, S_CONF_THR, 0.7);
 
@@ -1981,54 +2092,69 @@ static obs_properties_t *pd_properties(void *data)
 
 	obs_property_t *p = obs_properties_add_int(props, S_DELAY_MS, T_DELAY_MS, 0, 5000, 1);
 
-	obs_property_int_set_suffix(p, " ms");
+	obs_property_int_set_suffix(p, " 毫秒");
 
-	obs_properties_add_int(props, S_BACK_FRAMES, "Back Frames", 0, 300, 1);
+	obs_properties_add_int(props, S_BACK_FRAMES, "回溯帧数", 0, 300, 1);
 
-	obs_properties_add_int(props, S_HOLD_FRAMES, "Hold Frames", 0, 300, 1);
+	obs_properties_add_int(props, S_HOLD_FRAMES, "保持帧数", 0, 300, 1);
+
+    obs_property_t *roi_profile = obs_properties_add_list(props, S_ROI_PROFILE, "分辨率预设",
+                                                          OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(roi_profile, "16:9", (int)pd_roi_profile::Ratio16x9);
+    obs_property_list_add_int(roi_profile, "带鱼屏 21:9", (int)pd_roi_profile::Ultrawide21x9);
 
     // OCR settings
 
-    obs_properties_add_bool(props, S_ENABLE_OCR, "Enable OCR (PP-OCRv4 rec)");
+    obs_properties_add_bool(props, S_ENABLE_OCR, "启用文字识别");
 
-    obs_properties_add_int(props, S_OCR_INTERVAL_MS, "OCR Interval (ms, 0 = every frame)", 0, 10000, 10);
+    obs_properties_add_int(props, S_OCR_INTERVAL_MS, "识别间隔（毫秒，0=每帧）", 0, 10000, 10);
 
-    obs_properties_add_bool(props, S_USE_CPU, "Use CPU Inference (disable CUDA/TRT)");
+    obs_property_t *ocr_backend = obs_properties_add_list(props, S_OCR_BACKEND, "识别引擎",
+                                                          OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(ocr_backend, "Windows Runtime OCR", (int)pd_ocr_backend::WindowsRuntime);
+    obs_property_list_add_int(ocr_backend, "Paddle Inference CPU", (int)pd_ocr_backend::PaddleCpu);
+    obs_property_list_add_int(ocr_backend, "Paddle Inference GPU", (int)pd_ocr_backend::PaddleGpu);
 
-    obs_properties_add_int(props, S_CPU_THREADS, "CPU Threads", 1, 16, 1);
+    obs_properties_add_text(props, S_OCR_LANG, "识别语言标签（如 zh-Hans-CN / en-US / auto）",
+                            OBS_TEXT_DEFAULT);
 
-    obs_properties_add_int(props, S_GPU_ID, "GPU Device ID", 0, 7, 1);
+    obs_properties_add_path(props, S_MODEL_DIR, "Paddle 识别模型目录", OBS_PATH_DIRECTORY, NULL, NULL);
+    obs_properties_add_path(props, S_DICT_PATH, "Paddle 字典文件（ppocr_keys_v1.txt）", OBS_PATH_FILE,
+                            "文本文件 (*.txt);;所有文件 (*.*)", NULL);
+    obs_properties_add_int(props, S_CPU_THREADS, "Paddle CPU 线程数", 1, 16, 1);
+    obs_properties_add_int(props, S_GPU_ID, "Paddle GPU 设备 ID", 0, 7, 1);
+    obs_properties_add_int(props, S_GPU_MEM, "Paddle GPU 显存 MB", 256, 16384, 64);
 
-    obs_properties_add_int(props, S_GPU_MEM, "GPU Memory MB", 256, 16384, 64);
+    obs_properties_add_float(props, S_CONF_THR, "文字置信度阈值", 0.0, 1.0, 0.01);
 
-    obs_properties_add_path(props, S_MODEL_DIR, "Paddle Rec Model Dir", OBS_PATH_DIRECTORY, NULL, NULL);
-
-    obs_properties_add_float(props, S_CONF_THR, "Text Confidence Threshold", 0.0, 1.0, 0.01);
-
-    obs_properties_add_path(props, S_DICT_PATH, "Character Dict (ppocr_keys_v1.txt)", OBS_PATH_FILE, NULL, NULL);
-
-    obs_properties_add_bool(props, S_DEBUG_LOG, "Verbose OCR Debug Log");
+    obs_properties_add_bool(props, S_DEBUG_LOG, "详细识别调试日志");
 
     // Occluder mode (global)
-    obs_property_t *occ_mode = obs_properties_add_list(props, S_OCC_MODE, "Occluder Mode",
+    obs_property_t *occ_mode = obs_properties_add_list(props, S_OCC_MODE, "遮挡模式",
                                                        OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(occ_mode, "Image", (int)pd_occluder_mode::Image);
-    obs_property_list_add_int(occ_mode, "Mosaic", (int)pd_occluder_mode::Mosaic);
-    obs_property_list_add_int(occ_mode, "Gaussian Blur", (int)pd_occluder_mode::GaussianBlur);
+    obs_property_list_add_int(occ_mode, "图片", (int)pd_occluder_mode::Image);
+    obs_property_list_add_int(occ_mode, "马赛克", (int)pd_occluder_mode::Mosaic);
+    obs_property_list_add_int(occ_mode, "高斯模糊", (int)pd_occluder_mode::GaussianBlur);
 
-    obs_properties_add_int(props, S_OCC_MOSAIC, "Occluder Mosaic Block (px)", 1, 512, 1);
-    obs_properties_add_int(props, S_OCC_GAUSS, "Occluder Gaussian Strength", 1, 64, 1);
+    obs_properties_add_int(props, S_OCC_MOSAIC, "马赛克块大小（像素）", 1, 512, 1);
+    obs_properties_add_int(props, S_OCC_GAUSS, "高斯模糊强度", 1, 64, 1);
+    obs_properties_add_path(props, S_OCC_IMAGE_1, "遮挡图片 1（区域1）", OBS_PATH_FILE,
+                            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)", NULL);
+    obs_properties_add_path(props, S_OCC_IMAGE_2, "遮挡图片 2（区域2）", OBS_PATH_FILE,
+                            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)", NULL);
+    obs_properties_add_path(props, S_OCC_IMAGE_3, "遮挡图片 3（区域3）", OBS_PATH_FILE,
+                            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)", NULL);
 
     // ROI overlay options
 
-    obs_properties_add_bool(props, S_SHOW_ROI, "Show ROI Boxes");
+    obs_properties_add_bool(props, S_SHOW_ROI, "显示识别框");
 
-    obs_properties_add_int(props, S_ROI_THICK, "ROI Border Thickness (px)", 1, 20, 1);
+    obs_properties_add_int(props, S_ROI_THICK, "识别框线宽（像素）", 1, 20, 1);
 
-    obs_properties_add_color(props, S_ROI_COLOR, "ROI Color");
-    obs_properties_add_bool(props, S_OCC_BORDER, "Show Occluder Borders");
+    obs_properties_add_color(props, S_ROI_COLOR, "识别框颜色");
+    obs_properties_add_bool(props, S_OCC_BORDER, "显示遮挡区域边框");
 
-    obs_properties_add_button(props, "pd_test_trigger", "Trigger Backfill Now", pd_test_trigger_clicked);
+    obs_properties_add_button(props, "pd_test_trigger", "立即触发回填", pd_test_trigger_clicked);
 
     return props;
 
@@ -2302,14 +2428,90 @@ static pd_glyph pd_lookup_glyph(char c)
     switch (c) {
     case 'A': return {{0x0E,0x11,0x11,0x1F,0x11,0x11,0x11}, 5};
     case 'B': return {{0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, 5};
+    case 'C': return {{0x0E,0x11,0x10,0x10,0x10,0x11,0x0E}, 5};
+    case 'D': return {{0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}, 5};
+    case 'E': return {{0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F}, 5};
+    case 'F': return {{0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, 5};
     case 'G': return {{0x0E,0x11,0x10,0x17,0x11,0x11,0x0E}, 5};
+    case 'H': return {{0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, 5};
+    case 'I': return {{0x07,0x02,0x02,0x02,0x02,0x02,0x07}, 3};
+    case 'J': return {{0x07,0x01,0x01,0x01,0x11,0x11,0x0E}, 5};
+    case 'K': return {{0x11,0x12,0x14,0x18,0x14,0x12,0x11}, 5};
     case 'L': return {{0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, 5};
+    case 'M': return {{0x11,0x1B,0x15,0x15,0x11,0x11,0x11}, 5};
+    case 'N': return {{0x11,0x19,0x15,0x13,0x11,0x11,0x11}, 5};
+    case 'O': return {{0x0E,0x11,0x11,0x11,0x11,0x11,0x0E}, 5};
+    case 'P': return {{0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, 5};
+    case 'Q': return {{0x0E,0x11,0x11,0x11,0x15,0x12,0x0D}, 5};
     case 'R': return {{0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, 5};
     case 'S': return {{0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E}, 5};
+    case 'T': return {{0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, 5};
     case 'U': return {{0x11,0x11,0x11,0x11,0x11,0x11,0x0E}, 5};
+    case 'V': return {{0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, 5};
+    case 'W': return {{0x11,0x11,0x11,0x15,0x15,0x1B,0x11}, 5};
+    case 'X': return {{0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, 5};
+    case 'Y': return {{0x11,0x11,0x11,0x0A,0x04,0x04,0x04}, 5};
+    case 'Z': return {{0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, 5};
+    case '0': return {{0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, 5};
+    case '1': return {{0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, 5};
+    case '2': return {{0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, 5};
+    case '3': return {{0x0E,0x11,0x01,0x06,0x01,0x11,0x0E}, 5};
+    case '4': return {{0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, 5};
+    case '5': return {{0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, 5};
+    case '6': return {{0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, 5};
+    case '7': return {{0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, 5};
+    case '8': return {{0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, 5};
+    case '9': return {{0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, 5};
     case ' ': return {{0x00,0x00,0x00,0x00,0x00,0x00,0x00}, 3};
     default:  return {{0x00,0x00,0x00,0x00,0x00,0x00,0x00}, 3};
     }
+}
+
+static float pd_text_width(const char *text, float unit)
+{
+    if (!text || !*text)
+        return 0.0f;
+    float cursor = 0.0f;
+    for (const char *p = text; p && *p; ++p) {
+        pd_glyph g = pd_lookup_glyph((char)toupper((unsigned char)*p));
+        cursor += (float)g.width * unit + unit; // add 1 unit spacing
+    }
+    if (cursor > 0.0f)
+        cursor -= unit; // remove trailing spacing
+    return cursor;
+}
+
+static void pd_draw_text_line(const char *text, float x, float y, float unit, uint32_t color, float alpha)
+{
+    if (!text || !*text || unit <= 0.0f)
+        return;
+    float cursor = x;
+    for (const char *p = text; p && *p; ++p) {
+        pd_glyph glyph = pd_lookup_glyph((char)toupper((unsigned char)*p));
+        for (int row = 0; row < 7; ++row) {
+            uint8_t bits = glyph.rows[row];
+            for (int col = 0; col < glyph.width; ++col) {
+                if (bits & (1u << (glyph.width - col - 1))) {
+                    float gx = cursor + col * unit;
+                    float gy = y + row * unit;
+                    pd_draw_rect(gx, gy, unit, unit, color, alpha);
+                }
+            }
+        }
+        cursor += (float)glyph.width * unit + unit;
+    }
+}
+
+static void pd_draw_center_text(const pd_occ_rect &rect, const char *text, uint32_t color, float alpha)
+{
+    if (!text || !*text || rect.w <= 0 || rect.h <= 0)
+        return;
+    float unit = std::max(1.0f, std::min((float)rect.w, (float)rect.h) / 80.0f);
+    float width = pd_text_width(text, unit);
+    float height = 7.0f * unit;
+    float base_x = (float)rect.x + ((float)rect.w - width) * 0.5f;
+    float base_y = (float)rect.y + ((float)rect.h - height) * 0.5f;
+    pd_draw_text_line(text, base_x, base_y, unit, color, alpha);
 }
 
 static void pd_draw_watermark_text(const pd_occ_rect &rect)
@@ -2323,19 +2525,5 @@ static void pd_draw_watermark_text(const pd_occ_rect &rect)
     float base_y = (float)rect.y + (float)rect.h - glyph_height - margin;
     if (base_y < (float)rect.y)
         base_y = (float)rect.y;
-    float cursor = base_x;
-    for (const char *p = k_watermark_text; p && *p; ++p) {
-        pd_glyph glyph = pd_lookup_glyph((char)toupper((unsigned char)*p));
-        for (int row = 0; row < 7; ++row) {
-            uint8_t bits = glyph.rows[row];
-            for (int col = 0; col < glyph.width; ++col) {
-                if (bits & (1u << (glyph.width - col - 1))) {
-                    float x = cursor + col * unit;
-                    float y = base_y + row * unit;
-                    pd_draw_rect(x, y, unit, unit, k_watermark_color, k_watermark_alpha);
-                }
-            }
-        }
-        cursor += (float)glyph.width * unit + unit;
-    }
+    pd_draw_text_line(k_watermark_text, base_x, base_y, unit, k_watermark_color, k_watermark_alpha);
 }

@@ -122,6 +122,8 @@ function(_check_dependencies)
 
   string(JSON dependency_data GET ${buildspec} dependencies)
 
+  set(_need_obs FALSE)
+
   foreach(dependency IN LISTS dependencies_list)
     string(JSON data GET ${dependency_data} ${dependency})
     string(JSON version GET ${data} version)
@@ -156,6 +158,7 @@ function(_check_dependencies)
 
     set(skip FALSE)
     if(dependency STREQUAL prebuilt OR dependency STREQUAL qt6)
+      list(APPEND CMAKE_PREFIX_PATH "${dependencies_dir}/${destination}")
       if(OBS_DEPENDENCY_${dependency}_${arch}_HASH STREQUAL ${hash})
         _check_deps_version(${version})
 
@@ -213,6 +216,7 @@ function(_check_dependencies)
     elseif(dependency STREQUAL obs-studio)
       set(_obs_version ${version})
       set(_obs_destination "${destination}")
+      set(_need_obs TRUE)
       list(APPEND CMAKE_PREFIX_PATH "${dependencies_dir}")
     endif()
 
@@ -223,5 +227,9 @@ function(_check_dependencies)
 
   set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} CACHE PATH "CMake prefix search path" FORCE)
 
-  _setup_obs_studio()
+  if(_need_obs)
+    _setup_obs_studio()
+  else()
+    message(STATUS "obs-studio dependency skipped; using prebuilt headers/libs only")
+  endif()
 endfunction()

@@ -1,26 +1,33 @@
-# Exclude everything
-/*
+# Build output
+/build*/
+/out/
+/release/
+/install/
 
-# Except for default project files
-!/.github
-!/build-aux
-!/cmake
-!/data
-!/src
-!.clang-format
-!.gersemirc
-!.gitignore
-!buildspec.json
-!CMakeLists.txt
-!CMakePresets.json
-!LICENSE
-!README.md
+# Downloaded or locally installed SDKs/dependencies
+/.deps/
+/vcpkg_installed/
 
-# Exclude lock files
+# Local demo/scratch data
+/demo/
+/tmp*/
+/tmp_*
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Lock/cache files
 *.lock.json
-
-# Exclude macOS legacy resource forks
-.DS_Store
-
-# Exclude CMake build number cache
 /cmake/.CMakeBuildNumber
+
+# Editor/OS files
+.DS_Store
+Thumbs.db
+.vs/
+
+# Local image assets used while regenerating embedded occluder data.
+# Keep tools/img.py tracked; do not publish private screenshots or exports by accident.
+/tools/*
+!/tools/
+!/tools/img.py
