@@ -1,5 +1,7 @@
 # Squad No Map
 
+[中文说明](README.zh-CN.md)
+
 Squad No Map is an OBS Studio video filter for delaying a game capture and applying automatic occlusion when OCR detects sensitive UI text. It was built for Squad streams where the map, player list, role selection, or similar tactical information should not be exposed in real time.
 
 The plugin registers the OBS filter `predictive_delay` and appears in the UI as `预测遮挡延迟`.
